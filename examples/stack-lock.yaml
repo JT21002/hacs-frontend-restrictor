@@ -1,0 +1,16 @@
+type: custom:restrictor-card
+allowed_users: [root]
+mode: read_only
+overlay_opacity: 0.1
+grid_options:
+  rows: 4
+  columns: 6
+card:
+  type: vertical-stack
+  cards:
+    - type: entities
+      entities:
+        - light.salon
+        - light.cuisine
+    - type: picture-entity
+      entity: camera.maison

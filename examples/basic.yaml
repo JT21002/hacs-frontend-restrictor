@@ -1,0 +1,10 @@
+type: custom:restrictor-card
+allowed_users: [root]
+mode: read_only
+overlay_opacity: 0.12
+show_user: true
+card:
+  type: area
+  area: chambre_joshua
+  display_type: picture
+  features_position: bottom

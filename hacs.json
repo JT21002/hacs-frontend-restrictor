@@ -1,6 +1,8 @@
 {
   "name": "Restrictor Card",
-  "content_in_root": false,
+  "render_readme": true,
   "filename": "restrictor-card.js",
-  "render_readme": true
+  "country": "FR",
+  "homeassistant": "2025.10.0",
+  "domains": ["frontend"]
 }
