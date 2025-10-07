@@ -1,4 +1,8 @@
-// Restrictor Card — v0.7 (user-name only, badge inside card - bottom-left)
+// Restrictor Card — v0.8
+// - Lecture seule / cachée selon allowed_users (nom, insensible à la casse)
+// - Badge "Utilisateur" si show_user: true (nom uniquement)
+// - ⚠️ En mode édition du dashboard, l'overlay est désactivé pour laisser la mise en page fonctionner
+
 (function () {
 
   function makeErrorCard(message, origConfig) {
@@ -19,7 +23,7 @@
     try {
       const r = await fetch("/api/user", { credentials: "same-origin" });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      return await r.json(); // { id, name, ... }
+      return await r.json();
     } catch {
       return { id: "", name: "" };
     }
@@ -77,9 +81,7 @@
       return this._innerCard?.getCardSize?.() ?? 3;
     }
 
-    _norm(s) {
-      return String(s ?? "").trim().toLowerCase();
-    }
+    _norm(s) { return String(s ?? "").trim().toLowerCase(); }
 
     async _getCurrentUser() {
       const u = this._hass?.user;
@@ -87,7 +89,12 @@
       return await getUserFromApi();
     }
 
-    _wrapWithHaCard(inner, { showBadge, badgeText, lock, overlayOpacity }) {
+    _isEditMode() {
+      // HA expose souvent hass.editMode ; sinon, la classe body 'edit-mode' est présente.
+      return !!(this._hass?.editMode || document.body.classList.contains("edit-mode"));
+    }
+
+    _wrapWithHaCard(inner, { showBadge, badgeText, lock, overlayOpacity, blockInteraction }) {
       const wrapper = document.createElement("ha-card");
       wrapper.style.position = "relative";
       wrapper.style.display = "block";
@@ -98,7 +105,7 @@
         badge.textContent = badgeText;
         badge.style.position = "absolute";
         badge.style.left = "10px";
-        badge.style.bottom = "6px";          // 👈 badge dans la carte, bas-gauche
+        badge.style.bottom = "6px";
         badge.style.fontSize = "12px";
         badge.style.opacity = "0.72";
         badge.style.pointerEvents = "none";
@@ -106,20 +113,18 @@
         wrapper.appendChild(badge);
       }
 
-      if (typeof overlayOpacity === "number") {
+      if (blockInteraction) {
         const overlay = document.createElement("div");
         overlay.style.position = "absolute";
         overlay.style.inset = "0";
         overlay.style.zIndex = "10";
         overlay.style.cursor = "not-allowed";
-        overlay.style.background = `rgba(0,0,0,${overlayOpacity})`;
+        overlay.style.background = `rgba(0,0,0,${overlayOpacity || 0})`;
         const stop = e => { e.stopPropagation(); e.preventDefault(); };
         [
           "click","mousedown","mouseup","touchstart","touchend","pointerdown",
           "pointerup","change","input","keydown","keyup","contextmenu"
         ].forEach(ev => overlay.addEventListener(ev, stop, true));
-        wrapper.appendChild(overlay);
-
         if (lock) {
           const lockEl = document.createElement("div");
           lockEl.textContent = "🔒";
@@ -130,6 +135,7 @@
           lockEl.style.opacity = "0.6";
           overlay.appendChild(lockEl);
         }
+        wrapper.appendChild(overlay);
       }
 
       return wrapper;
@@ -143,12 +149,11 @@
       const innerCard = await createInnerCard(this._config.card, this._hass);
       this._innerCard = innerCard;
 
-      // Faut-il consulter l'utilisateur ?
       const needUser = this._config.show_user || this._config.allowed_users.length > 0;
       let user = { id: "", name: "" };
       if (needUser) user = await this._getCurrentUser();
 
-      // Autorisation par NOM uniquement (insensible à la casse)
+      // Autorisation par nom (insensible à la casse)
       let isAllowed = true;
       if (this._config.allowed_users.length > 0) {
         const uname = this._norm(user.name);
@@ -157,12 +162,13 @@
       }
 
       const badgeText = this._config.show_user ? `Utilisateur: ${user.name || "(inconnu)"}` : "";
+      const editing = this._isEditMode();
 
       if (isAllowed) {
-        // Autorisé → carte interactive
+        // Autorisé → carte interactive (badge optionnel)
         if (this._config.show_user) {
           const wrapped = this._wrapWithHaCard(innerCard, {
-            showBadge: true, badgeText, lock: false, overlayOpacity: undefined
+            showBadge: true, badgeText, lock: false, blockInteraction: false
           });
           root.appendChild(wrapped);
         } else {
@@ -176,12 +182,14 @@
         return;
       }
 
-      // Non autorisé → lecture seule (overlay) + badge + cadenas
+      // Non autorisé
+      // En mode édition → pas d'overlay pour laisser la mise en page fonctionner
       const wrapped = this._wrapWithHaCard(innerCard, {
         showBadge: !!this._config.show_user,
         badgeText,
-        lock: true,
-        overlayOpacity: this._config.overlay_opacity
+        lock: !editing,
+        overlayOpacity: editing ? 0 : this._config.overlay_opacity,
+        blockInteraction: !editing
       });
       root.appendChild(wrapped);
     }
