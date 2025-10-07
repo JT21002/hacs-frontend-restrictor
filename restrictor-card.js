@@ -129,80 +129,83 @@
       return null;
     }
 
-    _addOverlayInside(targetHaCard, { showBadge, badgeText, opacity, showLock, allowNav, navPath }) {
-      const overlay = document.createElement("div");
-      overlay.className = "restrictor-overlay";
-      overlay.style.position = "absolute";
-      overlay.style.inset = "0";
-      overlay.style.zIndex = "10";
-      overlay.style.cursor = allowNav ? "pointer" : "not-allowed";
-      overlay.style.background = `rgba(0,0,0,${opacity || 0})`;
+_addOverlayInside(targetHaCard, { showBadge, badgeText, opacity, showLock, allowNav, navPath }) {
+  const overlay = document.createElement("div");
+  overlay.className = "restrictor-overlay";
+  overlay.style.position = "absolute";
+  overlay.style.inset = "0";
+  overlay.style.zIndex = "9999";            // ⬅️ au-dessus de tout
+  overlay.style.cursor = allowNav ? "pointer" : "not-allowed";
+  overlay.style.background = `rgba(0,0,0,${opacity || 0})`;
+  overlay.style.pointerEvents = "auto";     // ⬅️ capte tous les events
 
-      const computed = getComputedStyle(targetHaCard);
-      if (computed.position === "static" || !computed.position) {
-        targetHaCard.style.position = "relative";
+  // s’assurer que ha-card peut contenir un absolu
+  const computed = getComputedStyle(targetHaCard);
+  if (!computed.position || computed.position === "static") {
+    targetHaCard.style.position = "relative";
+  }
+
+  const stopAll = (e) => {
+    e.stopImmediatePropagation();
+    e.stopPropagation();
+    e.preventDefault();
+  };
+
+  // Bloque tout (y compris click)
+  const events = [
+    "click","mousedown","mouseup","touchstart","touchend","pointerdown","pointerup",
+    "change","input","keydown","keyup","contextmenu","dblclick","dragstart","pointercancel"
+  ];
+  events.forEach(ev => {
+    const h = (e) => stopAll(e);
+    overlay.addEventListener(ev, h, true);
+    this._cleanup.push(() => overlay.removeEventListener(ev, h, true));
+  });
+
+  // Navigation contrôlée (on gère nous-mêmes le clic)
+  const onClick = (e) => {
+    stopAll(e);
+    if (allowNav && navPath) {
+      try {
+        const evt = new Event("location-changed", { bubbles: true, composed: true });
+        history.pushState(null, "", navPath);
+        window.dispatchEvent(evt);
+      } catch {
+        window.location.assign(navPath);
       }
-
-      const stop = e => { e.stopPropagation(); e.preventDefault(); };
-
-      // Bloque tout…
-      [
-        "mousedown","mouseup","touchstart","touchend","pointerdown",
-        "pointerup","change","input","keydown","keyup","contextmenu"
-      ].forEach(ev => {
-        const h = e => stop(e);
-        overlay.addEventListener(ev, h, true);
-        this._cleanup.push(() => overlay.removeEventListener(ev, h, true));
-      });
-
-      // …sauf le clic qui peut déclencher une navigation si activée
-      const onClick = (e) => {
-        stop(e);
-        if (allowNav && navPath) {
-          try {
-            // tentative de navigation "ha-style"
-            const event = new Event("location-changed", { bubbles: true, composed: true });
-            if (window.history && window.history.pushState) {
-              window.history.pushState(null, "", navPath);
-              window.dispatchEvent(event);
-            } else {
-              window.location.assign(navPath);
-            }
-          } catch {
-            window.location.assign(navPath);
-          }
-        }
-      };
-      overlay.addEventListener("click", onClick, true);
-      this._cleanup.push(() => overlay.removeEventListener("click", onClick, true));
-
-      if (showLock) {
-        const lockEl = document.createElement("div");
-        lockEl.textContent = "🔒";
-        lockEl.style.position = "absolute";
-        lockEl.style.top = "8px";
-        lockEl.style.right = "8px";
-        lockEl.style.fontSize = "14px";
-        lockEl.style.opacity = "0.6";
-        overlay.appendChild(lockEl);
-      }
-
-      if (showBadge) {
-        const badge = document.createElement("div");
-        badge.textContent = badgeText;
-        badge.style.position = "absolute";
-        badge.style.left = "10px";
-        badge.style.bottom = "6px";
-        badge.style.fontSize = "12px";
-        badge.style.opacity = "0.72";
-        badge.style.pointerEvents = "none";
-        badge.style.userSelect = "none";
-        overlay.appendChild(badge);
-      }
-
-      targetHaCard.appendChild(overlay);
-      this._cleanup.push(() => { try { targetHaCard.removeChild(overlay); } catch {}});
     }
+  };
+  overlay.addEventListener("click", onClick, true);
+  this._cleanup.push(() => overlay.removeEventListener("click", onClick, true));
+
+  if (showLock) {
+    const lockEl = document.createElement("div");
+    lockEl.textContent = "🔒";
+    lockEl.style.position = "absolute";
+    lockEl.style.top = "8px";
+    lockEl.style.right = "8px";
+    lockEl.style.fontSize = "14px";
+    lockEl.style.opacity = "0.6";
+    overlay.appendChild(lockEl);
+  }
+
+  if (showBadge) {
+    const badge = document.createElement("div");
+    badge.textContent = badgeText;
+    badge.style.position = "absolute";
+    badge.style.left = "10px";
+    badge.style.bottom = "6px";
+    badge.style.fontSize = "12px";
+    badge.style.opacity = "0.72";
+    badge.style.pointerEvents = "none";
+    badge.style.userSelect = "none";
+    overlay.appendChild(badge);
+  }
+
+  targetHaCard.appendChild(overlay);
+  this._cleanup.push(() => { try { targetHaCard.removeChild(overlay); } catch {} });
+}
+
 
     async _build() {
       // cleanup + watcher edit
