@@ -1,5 +1,5 @@
 // Restrictor Card — v1.0.1
-// - Bandeau "Recharger les ressources ?" fiable après update (ll-reload-resources)
+// - Bandeau "Recharger les ressorces ?" fiable après update (ll-reload-resources)
 // - Verrouillage robuste (Area + stacks), ré-applique sur mutations / navigation / visibilité
 // - Overlay OFF en mode édition (vue Sections)
 // - Filtrage par NOM d’utilisateur (insensible à la casse)
