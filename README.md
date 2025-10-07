@@ -48,17 +48,18 @@ Press **Ctrl + F5** or reload resources.
 
 ```yaml
 type: custom:restrictor-card
-allowed_users: [root]        # Users allowed to interact
+allowed_users:
+  - root
+  - test       # Users allowed to interact
 mode: read_only              # "read_only" or "hidden"
 overlay_opacity: 0.1         # Overlay opacity (0–1)
 show_user: true              # Show current user in badge
 
 card:
-  type: area
-  area: chambre_joshua
-  display_type: picture
-  features_position: bottom
-  color: cyan
+  show_name: true
+  show_icon: true
+  type: button
+  entity: light.prise_2
 
 ```
 
