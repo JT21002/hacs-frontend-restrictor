@@ -1,20 +1,34 @@
-// Restrictor Card — v1.0
-// - Bandeau "Recharger les ressources ?" après mise à jour (ll-reload-resources)
+// Restrictor Card — v1.0.1
+// - Bandeau "Recharger les ressources ?" fiable après update (ll-reload-resources)
 // - Verrouillage robuste (Area + stacks), ré-applique sur mutations / navigation / visibilité
 // - Overlay OFF en mode édition (vue Sections)
 // - Filtrage par NOM d’utilisateur (insensible à la casse)
 // - Support grid_options (rows/columns) + alias; priorité à view_layout de l’éditeur
 
-// === Reload prompt after update ===
-const RESTRICTOR_VERSION = "1.0.0";
+// === Reload prompt after update (deferred to ensure Lovelace listens) ===
+const RESTRICTOR_VERSION = "1.0.1";  // ⬅️ incrémente à chaque release
 try {
   const KEY = "restrictor_card_version";
-  const prev = localStorage.getItem(KEY);
-  if (prev && prev !== RESTRICTOR_VERSION) {
-    window.dispatchEvent(new Event("ll-reload-resources"));
+  const previous = localStorage.getItem(KEY);
+
+  if (previous && previous !== RESTRICTOR_VERSION) {
+    const triggerReloadBanner = () => {
+      try {
+        window.dispatchEvent(new Event("ll-reload-resources"));
+      } catch (e) {
+        // fallback silencieux
+      }
+    };
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", () => setTimeout(triggerReloadBanner, 500));
+    } else {
+      setTimeout(triggerReloadBanner, 1000); // s'assure que Lovelace a attaché ses listeners
+    }
   }
   localStorage.setItem(KEY, RESTRICTOR_VERSION);
-} catch (_) {}
+} catch (e) {
+  console.warn("[RestrictorCard] Reload banner error:", e);
+}
 
 (function () {
 
@@ -78,12 +92,12 @@ try {
         mode: config.mode || (config.read_only ? "read_only" : "read_only"), // "read_only" | "hidden"
         overlay_opacity: typeof config.overlay_opacity === "number" ? config.overlay_opacity : 0.0,
         show_user: !!config.show_user,
-        // mise en page
+        // mise en page :
         view_layout: config.view_layout,      // écrit par l’éditeur (prioritaire)
         grid_options: config.grid_options,    // { rows, columns }
         grid_rows: config.grid_rows ?? config.rows,
         grid_columns: config.grid_columns ?? config.columns,
-        // carte réelle
+        // carte réelle :
         card: config.card,
       };
       this._built = false;
@@ -112,11 +126,11 @@ try {
     }
 
     // ---------------- Layout (Sections) ----------------
-    // Règles:
-    // 1) si view_layout existe (posé par l’éditeur) → laisser HA décider (undefined)
-    // 2) sinon, utiliser grid_options / alias
-    // 3) sinon, relayer getLayoutOptions de la carte interne si dispo
-    // 4) sinon, fallback neutre {}
+    // Priorités:
+    // 1) view_layout (posé par l’éditeur) → laisser HA décider (undefined)
+    // 2) grid_options/alias → renvoyer {grid_rows, grid_columns}
+    // 3) si la carte interne expose getLayoutOptions → relayer
+    // 4) sinon → {} (neutre)
     getLayoutOptions() {
       if (this._config?.view_layout) return undefined;
 
@@ -204,7 +218,7 @@ try {
     }
 
     _clearReapplyTimer() { if (this._reapplyTimer) { clearTimeout(this._reapplyTimer); this._reapplyTimer = null; } }
-    _scheduleReapply(reason) {
+    _scheduleReapply() {
       this._clearReapplyTimer();
       const tries = [0, 50, 200, 600];
       let i = 0;
@@ -302,7 +316,7 @@ try {
       // nettoie
       this._clearOverlays();
 
-      // utilisateur
+      // utilisateur (si nécessaire)
       const needUser = this._config.show_user || (this._config.allowed_users?.length > 0);
       let user = { id: "", name: "" };
       if (needUser) user = await this._getCurrentUser();
@@ -315,7 +329,7 @@ try {
         isAllowed = names.includes(uname);
       }
 
-      // édition
+      // édition → jamais d’overlay
       if (this._isEditMode()) return;
 
       if (isAllowed) {
