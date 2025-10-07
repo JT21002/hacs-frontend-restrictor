@@ -78,27 +78,34 @@
 
     // ---------- Layout (Sections) ----------
     getLayoutOptions() {
-      // 1) si l’éditeur a défini view_layout → on laisse HA prioritaire
-      if (this._config?.view_layout) return undefined;
+  // 1) L’éditeur visuel a la priorité
+  if (this._config?.view_layout) return undefined;
 
-      // 2) grid_options { rows, columns }
-      const go = this._config?.grid_options || {};
-      const rows = Number(this._config?.grid_rows ?? go.rows);
-      const cols = Number(this._config?.grid_columns ?? go.columns);
+  // 2) grid_options / alias
+  const go = this._config?.grid_options || {};
+  const rows = Number(this._config?.grid_rows ?? go.rows);
+  const cols = Number(this._config?.grid_columns ?? go.columns);
+  const hasRows = Number.isFinite(rows) && rows > 0;
+  const hasCols = Number.isFinite(cols) && cols > 0;
+  if (hasRows || hasCols) {
+    const obj = {};
+    if (hasRows) obj.grid_rows = rows;
+    if (hasCols) obj.grid_columns = cols;
+    return obj;
+  }
 
-      const hasRows = Number.isFinite(rows) && rows > 0;
-      const hasCols = Number.isFinite(cols) && cols > 0;
-
-      if (hasRows || hasCols) {
-        const obj = {};
-        if (hasRows) obj.grid_rows = rows;
-        if (hasCols) obj.grid_columns = cols;
-        return obj;
-      }
-
-      // 3) sinon: ne renvoie rien (HA choisit la taille par défaut)
-      return undefined;
+  // 3) Déléguer à la carte interne si possible
+  if (this._innerCard && typeof this._innerCard.getLayoutOptions === "function") {
+    try {
+      return this._innerCard.getLayoutOptions();
+    } catch (_) {
+      // ignore
     }
+  }
+
+  // 4) Fallback sûr: objet vide (évite le “disparaît”)
+  return {};
+}
 
     getCardSize() { return this._innerCard?.getCardSize?.() ?? 3; }
     _norm(s) { return String(s ?? "").trim().toLowerCase(); }
