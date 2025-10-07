@@ -1,7 +1,7 @@
-// Restrictor Card — v0.10
-// - Injection overlay/badge DANS le ha-card interne (pas de wrapper) → compatible "Sections"
-// - Overlay désactivé en mode édition (détection robuste)
-// - Filtrage par NOM d’utilisateur uniquement, insensible à la casse
+// Restrictor Card — v0.13
+// - Comme v0.10 mais gère les stacks (horizontal/vertical/grid) : overlay sur TOUS les <ha-card> enfants
+// - Overlay OFF en mode édition (compat. Sections)
+// - Filtrage par NOM d’utilisateur (insensible à la casse)
 // - Badge utilisateur (nom) seulement si show_user: true
 
 (function () {
@@ -114,13 +114,34 @@
       this._editObserver.observe(target, { attributes: true, subtree: true, attributeFilter: ["class"] });
     }
 
-    _findHaCard(el) {
+    // --- NOUVEAU: récupère TOUS les <ha-card> descendants (stack-safe) ---
+    _findAllHaCards(el) {
+      const out = new Set();
+
+      // 1) ha-card direct dans le shadowRoot de la carte
       if (el?.shadowRoot) {
-        const hc = el.shadowRoot.querySelector("ha-card");
-        if (hc) return hc;
+        el.shadowRoot.querySelectorAll("ha-card").forEach(hc => out.add(hc));
       }
-      if (el && el.tagName && el.tagName.toLowerCase() === "ha-card") return el;
-      return null;
+
+      // 2) si la carte est un "stack", ses enfants sont d'autres cartes
+      //    on descend de 2 niveaux max pour éviter de tout traverser coûteusement
+      const scanCards = (node, depth = 0) => {
+        if (!node || depth > 2) return;
+        const sr = node.shadowRoot;
+        if (sr) {
+          sr.querySelectorAll("ha-card").forEach(hc => out.add(hc));
+          // descend vers d'autres custom elements potentiels
+          sr.querySelectorAll("*").forEach(child => {
+            if (child.shadowRoot) scanCards(child, depth + 1);
+          });
+        }
+      };
+      scanCards(el, 0);
+
+      // 3) fallback: si el est déjà un ha-card
+      if (el && el.tagName && el.tagName.toLowerCase() === "ha-card") out.add(el);
+
+      return Array.from(out);
     }
 
     _addOverlayInside(targetHaCard, { showBadge, badgeText, opacity, showLock }) {
@@ -204,7 +225,9 @@
 
       if (isAllowed) {
         if (this._config.show_user) {
-          const hc = this._findHaCard(innerCard);
+          // Ajoute un badge discret sur le PREMIER ha-card trouvé (s'il y en a)
+          const cards = this._findAllHaCards(innerCard);
+          const hc = cards[0];
           if (hc) {
             this._addOverlayInside(hc, {
               showBadge: true,
@@ -230,17 +253,19 @@
       }
 
       if (!editing) {
-        const hc = this._findHaCard(innerCard);
-        if (hc) {
+        // 🔒 NON AUTORISÉ : overlay sur TOUTES les sous-cartes
+        const cards = this._findAllHaCards(innerCard);
+        if (cards.length === 0) return; // rien trouvé (rare)
+        cards.forEach((hc, idx) => {
           this._addOverlayInside(hc, {
-            showBadge: !!this._config.show_user,
+            showBadge: !!this._config.show_user && idx === 0, // badge sur la 1ère carte seulement
             badgeText: `Utilisateur: ${user.name || "(inconnu)"}`,
             opacity: this._config.overlay_opacity,
             showLock: true
           });
-        }
+        });
       }
-      // En édition → aucun overlay pour que la mise en page Sections fonctionne.
+      // En édition → aucun overlay (mise en page OK).
     }
   }
 
