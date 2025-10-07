@@ -1,14 +1,10 @@
-// Restrictor Card — v0.11
-// - Overlay injecté dans le ha-card interne (pas de wrapper) → compatible Sections
+// Restrictor Card — v0.10
+// - Injection overlay/badge DANS le ha-card interne (pas de wrapper) → compatible "Sections"
 // - Overlay désactivé en mode édition (détection robuste)
-// - Filtrage par nom d’utilisateur (insensible à la casse)
-// - Badge utilisateur (nom uniquement) si show_user: true
-// - NEW: allow_navigation_when_locked → laisse passer la navigation en read_only
-// - NEW: console_debug → logs console
+// - Filtrage par NOM d’utilisateur uniquement, insensible à la casse
+// - Badge utilisateur (nom) seulement si show_user: true
 
 (function () {
-
-  const log = (...a) => console.info("[restrictor-card v0.11]", ...a);
 
   async function getUserFromApi() {
     try {
@@ -60,8 +56,6 @@
         mode: config.mode || (config.read_only ? "read_only" : "read_only"), // "read_only" | "hidden"
         overlay_opacity: typeof config.overlay_opacity === "number" ? config.overlay_opacity : 0.0,
         show_user: !!config.show_user,
-        allow_navigation_when_locked: !!config.allow_navigation_when_locked, // NEW
-        console_debug: !!config.console_debug, // NEW
         card: config.card,
       };
       this._built = false;
@@ -129,83 +123,57 @@
       return null;
     }
 
-_addOverlayInside(targetHaCard, { showBadge, badgeText, opacity, showLock, allowNav, navPath }) {
-  const overlay = document.createElement("div");
-  overlay.className = "restrictor-overlay";
-  overlay.style.position = "absolute";
-  overlay.style.inset = "0";
-  overlay.style.zIndex = "9999";            // ⬅️ au-dessus de tout
-  overlay.style.cursor = allowNav ? "pointer" : "not-allowed";
-  overlay.style.background = `rgba(0,0,0,${opacity || 0})`;
-  overlay.style.pointerEvents = "auto";     // ⬅️ capte tous les events
+    _addOverlayInside(targetHaCard, { showBadge, badgeText, opacity, showLock }) {
+      const overlay = document.createElement("div");
+      overlay.className = "restrictor-overlay";
+      overlay.style.position = "absolute";
+      overlay.style.inset = "0";
+      overlay.style.zIndex = "10";
+      overlay.style.cursor = "not-allowed";
+      overlay.style.background = `rgba(0,0,0,${opacity || 0})`;
 
-  // s’assurer que ha-card peut contenir un absolu
-  const computed = getComputedStyle(targetHaCard);
-  if (!computed.position || computed.position === "static") {
-    targetHaCard.style.position = "relative";
-  }
-
-  const stopAll = (e) => {
-    e.stopImmediatePropagation();
-    e.stopPropagation();
-    e.preventDefault();
-  };
-
-  // Bloque tout (y compris click)
-  const events = [
-    "click","mousedown","mouseup","touchstart","touchend","pointerdown","pointerup",
-    "change","input","keydown","keyup","contextmenu","dblclick","dragstart","pointercancel"
-  ];
-  events.forEach(ev => {
-    const h = (e) => stopAll(e);
-    overlay.addEventListener(ev, h, true);
-    this._cleanup.push(() => overlay.removeEventListener(ev, h, true));
-  });
-
-  // Navigation contrôlée (on gère nous-mêmes le clic)
-  const onClick = (e) => {
-    stopAll(e);
-    if (allowNav && navPath) {
-      try {
-        const evt = new Event("location-changed", { bubbles: true, composed: true });
-        history.pushState(null, "", navPath);
-        window.dispatchEvent(evt);
-      } catch {
-        window.location.assign(navPath);
+      const computed = getComputedStyle(targetHaCard);
+      if (computed.position === "static" || !computed.position) {
+        targetHaCard.style.position = "relative";
       }
+
+      const stop = e => { e.stopPropagation(); e.preventDefault(); };
+      [
+        "click","mousedown","mouseup","touchstart","touchend","pointerdown",
+        "pointerup","change","input","keydown","keyup","contextmenu"
+      ].forEach(ev => {
+        const h = e => stop(e);
+        overlay.addEventListener(ev, h, true);
+        this._cleanup.push(() => overlay.removeEventListener(ev, h, true));
+      });
+
+      if (showLock) {
+        const lockEl = document.createElement("div");
+        lockEl.textContent = "🔒";
+        lockEl.style.position = "absolute";
+        lockEl.style.top = "8px";
+        lockEl.style.right = "8px";
+        lockEl.style.fontSize = "14px";
+        lockEl.style.opacity = "0.6";
+        overlay.appendChild(lockEl);
+      }
+
+      if (showBadge) {
+        const badge = document.createElement("div");
+        badge.textContent = badgeText;
+        badge.style.position = "absolute";
+        badge.style.left = "10px";
+        badge.style.bottom = "6px";
+        badge.style.fontSize = "12px";
+        badge.style.opacity = "0.72";
+        badge.style.pointerEvents = "none";
+        badge.style.userSelect = "none";
+        overlay.appendChild(badge);
+      }
+
+      targetHaCard.appendChild(overlay);
+      this._cleanup.push(() => { try { targetHaCard.removeChild(overlay); } catch {}});
     }
-  };
-  overlay.addEventListener("click", onClick, true);
-  this._cleanup.push(() => overlay.removeEventListener("click", onClick, true));
-
-  if (showLock) {
-    const lockEl = document.createElement("div");
-    lockEl.textContent = "🔒";
-    lockEl.style.position = "absolute";
-    lockEl.style.top = "8px";
-    lockEl.style.right = "8px";
-    lockEl.style.fontSize = "14px";
-    lockEl.style.opacity = "0.6";
-    overlay.appendChild(lockEl);
-  }
-
-  if (showBadge) {
-    const badge = document.createElement("div");
-    badge.textContent = badgeText;
-    badge.style.position = "absolute";
-    badge.style.left = "10px";
-    badge.style.bottom = "6px";
-    badge.style.fontSize = "12px";
-    badge.style.opacity = "0.72";
-    badge.style.pointerEvents = "none";
-    badge.style.userSelect = "none";
-    overlay.appendChild(badge);
-  }
-
-  targetHaCard.appendChild(overlay);
-  this._cleanup.push(() => { try { targetHaCard.removeChild(overlay); } catch {} });
-}
-
 
     async _build() {
       // cleanup + watcher edit
@@ -233,9 +201,6 @@ _addOverlayInside(targetHaCard, { showBadge, badgeText, opacity, showLock, allow
       }
 
       const editing = this._computeEditMode();
-      if (this._config.console_debug) {
-        log("editMode:", editing, "user:", user.name, "isAllowed:", isAllowed);
-      }
 
       if (isAllowed) {
         if (this._config.show_user) {
@@ -245,9 +210,7 @@ _addOverlayInside(targetHaCard, { showBadge, badgeText, opacity, showLock, allow
               showBadge: true,
               badgeText: `Utilisateur: ${user.name || "(inconnu)"}`,
               opacity: 0,
-              showLock: false,
-              allowNav: false,
-              navPath: null
+              showLock: false
             });
           } else {
             const badge = document.createElement("div");
@@ -266,7 +229,6 @@ _addOverlayInside(targetHaCard, { showBadge, badgeText, opacity, showLock, allow
         return;
       }
 
-      // Non autorisé
       if (!editing) {
         const hc = this._findHaCard(innerCard);
         if (hc) {
@@ -274,13 +236,11 @@ _addOverlayInside(targetHaCard, { showBadge, badgeText, opacity, showLock, allow
             showBadge: !!this._config.show_user,
             badgeText: `Utilisateur: ${user.name || "(inconnu)"}`,
             opacity: this._config.overlay_opacity,
-            showLock: true,
-            allowNav: this._config.allow_navigation_when_locked,
-            navPath: this._config.card?.navigation_path || null
+            showLock: true
           });
         }
       }
-      // En édition → aucun overlay.
+      // En édition → aucun overlay pour que la mise en page Sections fonctionne.
     }
   }
 
