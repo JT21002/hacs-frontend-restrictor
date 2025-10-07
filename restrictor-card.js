@@ -1,9 +1,9 @@
-// Restrictor Card — v0.15.1 (hotfix)
-// Base stable (équivalent v0.10.1) : pas d’API layout custom, rien qui touche le gabarit
-// - Overlay injecté dans chaque <ha-card> descendant (stacks OK)
-// - Overlay OFF en mode édition
+// Restrictor Card — v0.16 (grid_options)
+// - Supporte grid_options (rows/columns) pour la vue Sections via getLayoutOptions()
+// - L’éditeur visuel (view_layout) garde la priorité s’il est utilisé
+// - Verrou lecture seule sur toutes les sous-cartes (stacks), overlay OFF en mode édition
 // - Filtrage par NOM d’utilisateur (insensible à la casse)
-// - Badge utilisateur (nom) uniquement si show_user: true
+// - Badge utilisateur (nom) si show_user: true
 
 (function () {
   async function getUserFromApi() {
@@ -11,35 +11,22 @@
       const r = await fetch("/api/user", { credentials: "same-origin" });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       return await r.json();
-    } catch {
-      return { id: "", name: "" };
-    }
+    } catch { return { id: "", name: "" }; }
   }
 
   function makeErrorCard(message, origConfig) {
     const el = document.createElement("hui-error-card");
     try { el.setConfig({ type: "error", error: message, origConfig: origConfig || {} }); return el; }
-    catch {
-      const c = document.createElement("ha-card");
-      c.style.padding = "12px";
-      c.style.color = "var(--error-color,#db4437)";
-      c.textContent = `Restrictor Card: ${message}`;
-      return c;
-    }
+    catch { const c=document.createElement("ha-card"); c.style.padding="12px"; c.style.color="var(--error-color,#db4437)"; c.textContent=`Restrictor Card: ${message}`; return c; }
   }
 
   async function createInnerCard(config, hass) {
     try {
       const helpers = window.loadCardHelpers ? await window.loadCardHelpers() : null;
-      if (helpers?.createCardElement) {
-        const card = helpers.createCardElement(config);
-        card.hass = hass;
-        return card;
-      }
+      if (helpers?.createCardElement) { const card = helpers.createCardElement(config); card.hass = hass; return card; }
     } catch {}
     const fallback = makeErrorCard("Helpers non disponibles (ressource/front). Vider le cache.", config);
-    fallback.hass = hass;
-    return fallback;
+    fallback.hass = hass; return fallback;
   }
 
   class RestrictorCard extends HTMLElement {
@@ -55,7 +42,7 @@
       this._lastEditState = false;
     }
 
-    // ---- cycle/config ----
+    // ---------- Config ----------
     setConfig(config) {
       if (!config || !config.card) throw new Error('Restrictor Card: il manque la clé "card".');
       this._config = {
@@ -63,6 +50,12 @@
         mode: config.mode || (config.read_only ? "read_only" : "read_only"), // "read_only" | "hidden"
         overlay_opacity: typeof config.overlay_opacity === "number" ? config.overlay_opacity : 0.0,
         show_user: !!config.show_user,
+        // mise en page : l’éditeur HA écrit ici; priorité absolue
+        view_layout: config.view_layout,
+        // support manuel via grid_options / alias
+        grid_options: config.grid_options,
+        grid_rows: config.grid_rows ?? config.rows,
+        grid_columns: config.grid_columns ?? config.columns,
         card: config.card,
       };
       this._built = false;
@@ -78,10 +71,33 @@
     }
 
     disconnectedCallback() {
-      this._cleanup.forEach(u => { try { u(); } catch {} });
-      this._cleanup = [];
-      if (this._editObserver) { try { this._editObserver.disconnect(); } catch {} }
+      this._cleanup.forEach(u=>{try{u();}catch{}}); this._cleanup=[];
+      if (this._editObserver) { try{this._editObserver.disconnect();}catch{} }
       this._editObserver = null;
+    }
+
+    // ---------- Layout (Sections) ----------
+    getLayoutOptions() {
+      // 1) si l’éditeur a défini view_layout → on laisse HA prioritaire
+      if (this._config?.view_layout) return undefined;
+
+      // 2) grid_options { rows, columns }
+      const go = this._config?.grid_options || {};
+      const rows = Number(this._config?.grid_rows ?? go.rows);
+      const cols = Number(this._config?.grid_columns ?? go.columns);
+
+      const hasRows = Number.isFinite(rows) && rows > 0;
+      const hasCols = Number.isFinite(cols) && cols > 0;
+
+      if (hasRows || hasCols) {
+        const obj = {};
+        if (hasRows) obj.grid_rows = rows;
+        if (hasCols) obj.grid_columns = cols;
+        return obj;
+      }
+
+      // 3) sinon: ne renvoie rien (HA choisit la taille par défaut)
+      return undefined;
     }
 
     getCardSize() { return this._innerCard?.getCardSize?.() ?? 3; }
@@ -189,7 +205,7 @@
       this._cleanup.push(() => { try { targetHaCard.removeChild(overlay); } catch {}});
     }
 
-    // ---- build ----
+    // ---------- build ----------
     async _build() {
       // reset + watcher
       this.disconnectedCallback();
@@ -242,10 +258,7 @@
         return;
       }
 
-      if (this._config.mode === "hidden") {
-        this.style.display = "none";
-        return;
-      }
+      if (this._config.mode === "hidden") { this.style.display = "none"; return; }
 
       if (!editing) {
         // overlay sur chaque sous-carte (stacks)
