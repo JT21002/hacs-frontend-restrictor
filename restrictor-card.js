@@ -1,8 +1,8 @@
-// Restrictor Card — v0.9
-// - Injecte overlay et badge DANS le ha-card interne (pas de wrapper) => meilleur support mise en page
-// - Désactive overlay en mode édition
-// - Filtrage par nom d'utilisateur (insensible à la casse)
-// - Badge nom uniquement si show_user: true
+// Restrictor Card — v0.10 (Sections-ready)
+// - Overlay désactivé en édition (détection robuste via MutationObserver)
+// - Injection dans ha-card interne (pas de wrapper) → compatible Sections
+// - Filtrage par nom d’utilisateur (insensible à la casse)
+// - Badge utilisateur (nom uniquement) si show_user: true
 
 (function () {
 
@@ -44,7 +44,9 @@
       this._config = null;
       this._built = false;
       this._innerCard = null;
-      this._cleanup = []; // listeners à retirer si rebuild
+      this._cleanup = [];
+      this._editObserver = null;
+      this._lastEditState = false;
     }
 
     setConfig(config) {
@@ -69,8 +71,10 @@
     }
 
     disconnectedCallback() {
-      this._cleanup.forEach(unsub => { try { unsub(); } catch {} });
+      this._cleanup.forEach(u => { try { u(); } catch {} });
       this._cleanup = [];
+      if (this._editObserver) { try { this._editObserver.disconnect(); } catch {} }
+      this._editObserver = null;
     }
 
     getCardSize() {
@@ -85,31 +89,55 @@
       return await getUserFromApi();
     }
 
-    _isEditMode() {
-      return !!(this._hass?.editMode || document.body.classList.contains("edit-mode"));
+    // Détection robuste du mode édition (Masonry, Sections, etc.)
+    _computeEditMode() {
+      // 1) API moderne
+      if (this._hass && typeof this._hass.editMode === "boolean") return this._hass.editMode;
+      // 2) Classe globale sur le body
+      if (document.body.classList.contains("edit-mode")) return true;
+      // 3) Attributs sur le hui-view/hui-root
+      try {
+        const huiRoot = document.querySelector("home-assistant")?.shadowRoot
+          ?.querySelector("ha-panel-lovelace")?.shadowRoot
+          ?.querySelector("hui-root");
+        const view = huiRoot?.shadowRoot?.querySelector("hui-view, hui-sectioned-view");
+        if (view?.classList?.contains("edit-mode") || view?.hasAttribute?.("edit-mode")) return true;
+      } catch {}
+      return false;
+    }
+
+    _watchEditMode() {
+      const target = document.body;
+      if (!target || this._editObserver) return;
+      this._lastEditState = this._computeEditMode();
+      this._editObserver = new MutationObserver(() => {
+        const now = this._computeEditMode();
+        if (now !== this._lastEditState) {
+          this._lastEditState = now;
+          this._build(); // re-render sans overlay en édition
+        }
+      });
+      this._editObserver.observe(target, { attributes: true, subtree: true, attributeFilter: ["class"] });
     }
 
     _findHaCard(el) {
-      // tente de trouver le <ha-card> de la carte interne
       if (el?.shadowRoot) {
         const hc = el.shadowRoot.querySelector("ha-card");
         if (hc) return hc;
       }
-      // parfois la carte renvoie déjà un ha-card
       if (el && el.tagName && el.tagName.toLowerCase() === "ha-card") return el;
       return null;
     }
 
     _addOverlayInside(targetHaCard, { showBadge, badgeText, opacity, showLock }) {
-      // container overlay
       const overlay = document.createElement("div");
+      overlay.className = "restrictor-overlay";
       overlay.style.position = "absolute";
       overlay.style.inset = "0";
       overlay.style.zIndex = "10";
       overlay.style.cursor = "not-allowed";
       overlay.style.background = `rgba(0,0,0,${opacity || 0})`;
 
-      // s'assurer que ha-card est positionné
       const computed = getComputedStyle(targetHaCard);
       if (computed.position === "static" || !computed.position) {
         targetHaCard.style.position = "relative";
@@ -120,9 +148,9 @@
         "click","mousedown","mouseup","touchstart","touchend","pointerdown",
         "pointerup","change","input","keydown","keyup","contextmenu"
       ].forEach(ev => {
-        const handler = (e) => stop(e);
-        overlay.addEventListener(ev, handler, true);
-        this._cleanup.push(() => overlay.removeEventListener(ev, handler, true));
+        const h = e => stop(e);
+        overlay.addEventListener(ev, h, true);
+        this._cleanup.push(() => overlay.removeEventListener(ev, h, true));
       });
 
       if (showLock) {
@@ -154,8 +182,9 @@
     }
 
     async _build() {
-      // cleanup précédent
+      // cleanup
       this.disconnectedCallback();
+      this._watchEditMode();
 
       this._built = true;
       const root = this.shadowRoot;
@@ -163,13 +192,14 @@
 
       const innerCard = await createInnerCard(this._config.card, this._hass);
       this._innerCard = innerCard;
-      root.appendChild(innerCard); // on insère la carte telle quelle
+      root.appendChild(innerCard);
 
+      // Besoin utilisateur ?
       const needUser = this._config.show_user || this._config.allowed_users.length > 0;
       let user = { id: "", name: "" };
       if (needUser) user = await this._getCurrentUser();
 
-      // autorisation par nom
+      // Autorisation par nom (insensible à la casse)
       let isAllowed = true;
       if (this._config.allowed_users.length > 0) {
         const uname = this._norm(user.name);
@@ -177,21 +207,20 @@
         isAllowed = names.includes(uname);
       }
 
-      const editing = this._isEditMode();
+      const editing = this._computeEditMode();
 
-      // si autorisé : rien à bloquer, mais on peut afficher le badge si demandé
       if (isAllowed) {
+        // Autorisé → pas d’overlay (sauf badge visuel facultatif)
         if (this._config.show_user) {
           const hc = this._findHaCard(innerCard);
           if (hc) {
             this._addOverlayInside(hc, {
               showBadge: true,
               badgeText: `Utilisateur: ${user.name || "(inconnu)"}`,
-              opacity: 0,       // pas de voile
-              showLock: false   // pas de cadenas
+              opacity: 0,
+              showLock: false
             });
           } else {
-            // fallback : petit badge au-dessus (rare)
             const badge = document.createElement("div");
             badge.textContent = `Utilisateur: ${user.name || "(inconnu)"}`;
             badge.style.fontSize = "12px";
@@ -208,61 +237,19 @@
         return;
       }
 
-      // non autorisé : lecture seule
+      // Non autorisé
       if (!editing) {
         const hc = this._findHaCard(innerCard);
         if (hc) {
           this._addOverlayInside(hc, {
-            showBadge: this._config.show_user,
+            showBadge: !!this._config.show_user,
             badgeText: `Utilisateur: ${user.name || "(inconnu)"}`,
             opacity: this._config.overlay_opacity,
             showLock: true
           });
-        } else {
-          // Fallback si pas de ha-card interne : on re-utilise un wrapper
-          const wrapper = document.createElement("div");
-          wrapper.style.position = "relative";
-          wrapper.style.display = "block";
-          root.insertBefore(wrapper, innerCard);
-          root.removeChild(innerCard);
-          wrapper.appendChild(innerCard);
-
-          const overlay = document.createElement("div");
-          overlay.style.position = "absolute";
-          overlay.style.inset = "0";
-          overlay.style.zIndex = "10";
-          overlay.style.cursor = "not-allowed";
-          overlay.style.background = `rgba(0,0,0,${this._config.overlay_opacity || 0})`;
-          const stop = e => { e.stopPropagation(); e.preventDefault(); };
-          ["click","mousedown","mouseup","touchstart","touchend","pointerdown","pointerup","change","input","keydown","keyup","contextmenu"].forEach(ev =>
-            overlay.addEventListener(ev, stop, true)
-          );
-          const lockEl = document.createElement("div");
-          lockEl.textContent = "🔒";
-          lockEl.style.position = "absolute";
-          lockEl.style.top = "8px";
-          lockEl.style.right = "8px";
-          lockEl.style.fontSize = "14px";
-          lockEl.style.opacity = "0.6";
-          overlay.appendChild(lockEl);
-
-          if (this._config.show_user) {
-            const badge = document.createElement("div");
-            badge.textContent = `Utilisateur: ${user.name || "(inconnu)"}`;
-            badge.style.position = "absolute";
-            badge.style.left = "10px";
-            badge.style.bottom = "6px";
-            badge.style.fontSize = "12px";
-            badge.style.opacity = "0.72";
-            badge.style.pointerEvents = "none";
-            badge.style.userSelect = "none";
-            overlay.appendChild(badge);
-          }
-
-          wrapper.appendChild(overlay);
         }
       }
-      // en mode édition: pas d'overlay => tu peux bouger/redimensionner
+      // En édition → aucun overlay, pour que la mise en page fonctionne.
     }
   }
 
