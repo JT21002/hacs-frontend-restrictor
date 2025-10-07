@@ -1,10 +1,9 @@
-// Restrictor Card — v1.0 (robuste re-lock)
-// - Re-lock automatique sur mutations du DOM (area card, images, etc.)
-// - Re-lock sur changement de vue / visibilité
-// - Rafale de retries pour les rendus async
-// - Overlay OFF en mode édition, stacks supportés
+// Restrictor Card — v1.0.2 (no reload-banner)
+// - Verrouillage robuste (Area + stacks), ré-applique sur mutations / navigation / visibilité
+// - Overlay OFF en mode édition (vue Sections)
 // - Filtrage par NOM d’utilisateur (insensible à la casse)
-// - Support grid_options (rows/columns) + alias; priorité à view_layout de l'éditeur
+// - Support grid_options (rows/columns) + alias; priorité à view_layout de l’éditeur
+// - Badge utilisateur déplacé EN HAUT À GAUCHE (show_user: true)
 
 (function () {
 
@@ -68,10 +67,12 @@
         mode: config.mode || (config.read_only ? "read_only" : "read_only"), // "read_only" | "hidden"
         overlay_opacity: typeof config.overlay_opacity === "number" ? config.overlay_opacity : 0.0,
         show_user: !!config.show_user,
-        view_layout: config.view_layout,     // priorité à l'éditeur
-        grid_options: config.grid_options,   // support manuel
+        // mise en page :
+        view_layout: config.view_layout,      // écrit par l’éditeur (prioritaire)
+        grid_options: config.grid_options,    // { rows, columns }
         grid_rows: config.grid_rows ?? config.rows,
         grid_columns: config.grid_columns ?? config.columns,
+        // carte réelle :
         card: config.card,
       };
       this._built = false;
@@ -84,7 +85,7 @@
       if (this._innerCard && this._innerCard.hass !== hass) {
         try { this._innerCard.hass = hass; } catch {}
       }
-      // Quand hass change (états), re-lock décalé
+      // re-lock décalé quand hass met à jour les états
       this._scheduleReapply("hass-update");
     }
 
@@ -100,11 +101,14 @@
     }
 
     // ---------------- Layout (Sections) ----------------
+    // Priorités:
+    // 1) view_layout (posé par l’éditeur) → laisser HA décider (undefined)
+    // 2) grid_options/alias → renvoyer {grid_rows, grid_columns}
+    // 3) si la carte interne expose getLayoutOptions → relayer
+    // 4) sinon → {} (neutre)
     getLayoutOptions() {
-      // 1) l'éditeur visuel a la priorité
       if (this._config?.view_layout) return undefined;
 
-      // 2) grid_options / alias
       const go = this._config?.grid_options || {};
       const rows = Number(this._config?.grid_rows ?? go.rows);
       const cols = Number(this._config?.grid_columns ?? go.columns);
@@ -117,12 +121,10 @@
         return obj;
       }
 
-      // 3) relayer la carte interne si possible
       if (this._innerCard && typeof this._innerCard.getLayoutOptions === "function") {
         try { return this._innerCard.getLayoutOptions(); } catch {}
       }
 
-      // 4) fallback neutre (évite disparition)
       return {};
     }
 
@@ -191,8 +193,7 @@
     }
 
     _clearReapplyTimer() { if (this._reapplyTimer) { clearTimeout(this._reapplyTimer); this._reapplyTimer = null; } }
-    _scheduleReapply(reason) {
-      // Débouncer + rafale de retries pour couvrir les re-render async
+    _scheduleReapply() {
       this._clearReapplyTimer();
       const tries = [0, 50, 200, 600];
       let i = 0;
@@ -255,25 +256,29 @@
         this._cleanup.push(() => overlay.removeEventListener(ev, h, true));
       });
 
+      // 🔒 cadenas en HAUT DROIT
       if (showLock) {
         const l = document.createElement("div");
         l.textContent = "🔒";
         l.style.position = "absolute";
         l.style.top = "8px";
-        l.style.right = "8px";
-        l.style.fontSize = "14px";
-        l.style.opacity = "0.6";
+        l.style.right = "10px";
+        l.style.fontSize = "15px";
+        l.style.opacity = "0.7";
         overlay.appendChild(l);
       }
 
+      // 👤 badge utilisateur en HAUT GAUCHE (show_user)
       if (showBadge) {
         const b = document.createElement("div");
         b.textContent = badgeText;
         b.style.position = "absolute";
+        b.style.top = "8px";
         b.style.left = "10px";
-        b.style.bottom = "6px";
-        b.style.fontSize = "12px";
-        b.style.opacity = "0.72";
+        b.style.fontSize = "13px";
+        b.style.fontWeight = "500";
+        b.style.color = "var(--primary-text-color)";
+        b.style.opacity = "0.85";
         b.style.pointerEvents = "none";
         b.style.userSelect = "none";
         overlay.appendChild(b);
@@ -290,7 +295,7 @@
       // nettoie
       this._clearOverlays();
 
-      // utilisateur
+      // utilisateur (si nécessaire)
       const needUser = this._config.show_user || (this._config.allowed_users?.length > 0);
       let user = { id: "", name: "" };
       if (needUser) user = await this._getCurrentUser();
@@ -303,7 +308,7 @@
         isAllowed = names.includes(uname);
       }
 
-      // édition
+      // édition → jamais d’overlay
       if (this._isEditMode()) return;
 
       if (isAllowed) {
