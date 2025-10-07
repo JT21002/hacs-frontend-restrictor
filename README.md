@@ -60,6 +60,8 @@ card:
   features_position: bottom
   color: cyan
 
+```
+
 🧱 Layout Options (Grid/Section views)
 
 | Option                 | Type   | Description                |
@@ -70,10 +72,11 @@ card:
 | `view_layout`          | object | Auto-managed by Lovelace   |
 
 🧩 Example:
-
+```yaml
 grid_options:
   rows: 4
   columns: 6
+```
 
 🔐 Lock Modes
 
@@ -92,6 +95,8 @@ grid_options:
 🧩 Advanced Usage
 
 🔹 Stack multiple cards
+
+```yaml
 type: custom:restrictor-card
 allowed_users: [root]
 mode: read_only
@@ -104,7 +109,9 @@ card:
         - light.kitchen
     - type: picture-entity
       entity: camera.living_room
+```
 
+```yaml
 🔹 Lock an entire view
 Wrap all cards in a single Restrictor Card:
 type: custom:restrictor-card
@@ -119,6 +126,7 @@ card:
       cards:
         - type: button
           entity: light.office
+```
 
 🛠️ Troubleshooting
 | Problem                | Solution                                               |
