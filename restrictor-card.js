@@ -1,4 +1,4 @@
-// Restrictor Card — v1 (robuste re-lock)
+// Restrictor Card — v1.1 (robuste re-lock)
 // - Re-lock automatique sur mutations du DOM (area card, images, etc.)
 // - Re-lock sur changement de vue / visibilité
 // - Rafale de retries pour les rendus async
@@ -7,7 +7,7 @@
 // - Support grid_options (rows/columns) + alias; priorité à view_layout de l'éditeur
 
 // === Reload prompt after update ===
-const RESTRICTOR_VERSION = "1";  // <-- mets ici la version du fichier
+const RESTRICTOR_VERSION = "1.1";  // <-- mets ici la version du fichier
 try {
   const KEY = "restrictor_card_version";
   const previous = localStorage.getItem(KEY);
