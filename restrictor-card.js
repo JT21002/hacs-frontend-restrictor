@@ -1,8 +1,10 @@
-// Restrictor Card — v0.10.1
-// - Comme v0.10 mais gère les stacks (horizontal/vertical/grid) : overlay sur TOUS les <ha-card> enfants
+// Restrictor Card — v0.15
+// - Verrou sur TOUS les <ha-card> enfants (stacks supportés)
 // - Overlay OFF en mode édition (compat. Sections)
 // - Filtrage par NOM d’utilisateur (insensible à la casse)
-// - Badge utilisateur (nom) seulement si show_user: true
+// - Badge utilisateur (nom) uniquement si show_user: true
+// - NEW: Mise en page Sections → relais getLayoutOptions() de la carte interne
+//        + pont _updateLayoutBridge() pour exposer la taille idéale
 
 (function () {
 
@@ -19,7 +21,13 @@
   function makeErrorCard(message, origConfig) {
     const el = document.createElement("hui-error-card");
     try { el.setConfig({ type: "error", error: message, origConfig: origConfig || {} }); return el; }
-    catch { const c=document.createElement("ha-card"); c.style.padding="12px"; c.style.color="var(--error-color,#db4437)"; c.textContent=`Restrictor Card: ${message}`; return c; }
+    catch {
+      const c=document.createElement("ha-card");
+      c.style.padding="12px";
+      c.style.color="var(--error-color,#db4437)";
+      c.textContent=`Restrictor Card: ${message}`;
+      return c;
+    }
   }
 
   async function createInnerCard(config, hass) {
@@ -42,12 +50,14 @@
       this.attachShadow({ mode: "open" });
       this._hass = null;
       this._config = null;
-      this._built = false;
       this._innerCard = null;
+      this._built = false;
       this._cleanup = [];
       this._editObserver = null;
       this._lastEditState = false;
     }
+
+    // ---------- Config / cycle ----------
 
     setConfig(config) {
       if (!config || !config.card) throw new Error('Restrictor Card: il manque la clé "card".');
@@ -77,8 +87,33 @@
       this._editObserver = null;
     }
 
-    getCardSize() { return this._innerCard?.getCardSize?.() ?? 3; }
+    // ---------- Layout API (Sections) ----------
 
+    // Sections layout: relayer la taille/placement de la carte interne
+    getLayoutOptions() {
+      if (this._innerCard && typeof this._innerCard.getLayoutOptions === "function") {
+        try { return this._innerCard.getLayoutOptions(); } catch {}
+      }
+      // Fallback compact (évite le gabarit géant)
+      return { grid_rows: 2, grid_columns: 2 };
+    }
+
+    // Expose (miroir) la valeur sur this.layout pour les moteurs qui lisent la prop
+    _updateLayoutBridge() {
+      try {
+        if (this._innerCard && typeof this._innerCard.getLayoutOptions === "function") {
+          this.layout = this._innerCard.getLayoutOptions();
+        } else {
+          this.layout = { grid_rows: 2, grid_columns: 2 };
+        }
+      } catch {
+        this.layout = { grid_rows: 2, grid_columns: 2 };
+      }
+    }
+
+    // ---------- Utilitaires ----------
+
+    getCardSize() { return this._innerCard?.getCardSize?.() ?? 3; }
     _norm(s) { return String(s ?? "").trim().toLowerCase(); }
 
     async _getCurrentUser() {
@@ -108,40 +143,38 @@
         const now = this._computeEditMode();
         if (now !== this._lastEditState) {
           this._lastEditState = now;
-          this._build();
+          // on ne rebuild pas tout : on ré-applique juste l’état (overlay on/off)
+          this._applyLockState();
         }
       });
       this._editObserver.observe(target, { attributes: true, subtree: true, attributeFilter: ["class"] });
     }
 
-    // --- NOUVEAU: récupère TOUS les <ha-card> descendants (stack-safe) ---
+    // Récupère TOUS les <ha-card> descendants (utile pour stacks)
     _findAllHaCards(el) {
       const out = new Set();
-
-      // 1) ha-card direct dans le shadowRoot de la carte
-      if (el?.shadowRoot) {
-        el.shadowRoot.querySelectorAll("ha-card").forEach(hc => out.add(hc));
-      }
-
-      // 2) si la carte est un "stack", ses enfants sont d'autres cartes
-      //    on descend de 2 niveaux max pour éviter de tout traverser coûteusement
-      const scanCards = (node, depth = 0) => {
-        if (!node || depth > 2) return;
-        const sr = node.shadowRoot;
-        if (sr) {
-          sr.querySelectorAll("ha-card").forEach(hc => out.add(hc));
-          // descend vers d'autres custom elements potentiels
-          sr.querySelectorAll("*").forEach(child => {
-            if (child.shadowRoot) scanCards(child, depth + 1);
-          });
+      const seen = new Set();
+      const crawl = (node, depth = 0) => {
+        if (!node || seen.has(node) || depth > 5) return;
+        seen.add(node);
+        if (node.shadowRoot) {
+          node.shadowRoot.querySelectorAll("ha-card").forEach(hc => out.add(hc));
+          node.shadowRoot.querySelectorAll("*").forEach(child => crawl(child, depth + 1));
         }
       };
-      scanCards(el, 0);
-
-      // 3) fallback: si el est déjà un ha-card
+      crawl(el, 0);
       if (el && el.tagName && el.tagName.toLowerCase() === "ha-card") out.add(el);
-
       return Array.from(out);
+    }
+
+    _clearOverlays() {
+      // Supprime uniquement nos overlays/badges
+      const root = this._innerCard?.shadowRoot || this.shadowRoot;
+      if (!root) return;
+      const all = root.querySelectorAll(".restrictor-overlay");
+      all.forEach(n => { try { n.parentElement.removeChild(n); } catch {} });
+      this._cleanup.forEach(u => { try { u(); } catch {} });
+      this._cleanup = [];
     }
 
     _addOverlayInside(targetHaCard, { showBadge, badgeText, opacity, showLock }) {
@@ -196,24 +229,22 @@
       this._cleanup.push(() => { try { targetHaCard.removeChild(overlay); } catch {}});
     }
 
-    async _build() {
-      // cleanup + watcher edit
-      this.disconnectedCallback();
-      this._watchEditMode();
+    // ---------- Application du verrou ----------
 
-      this._built = true;
-      const root = this.shadowRoot;
-      root.innerHTML = "";
+    async _applyLockState() {
+      if (!this._innerCard) return;
 
-      const innerCard = await createInnerCard(this._config.card, this._hass);
-      this._innerCard = innerCard;
-      root.appendChild(innerCard);
+      // Nettoie overlays existants
+      this._clearOverlays();
+
+      // Met à jour le pont de layout (si la carte interne a bougé/chargé)
+      this._updateLayoutBridge();
 
       const needUser = this._config.show_user || this._config.allowed_users.length > 0;
       let user = { id: "", name: "" };
       if (needUser) user = await this._getCurrentUser();
 
-      // autorisation par nom
+      // Autorisation par nom (insensible à la casse)
       let isAllowed = true;
       if (this._config.allowed_users.length > 0) {
         const uname = this._norm(user.name);
@@ -223,10 +254,12 @@
 
       const editing = this._computeEditMode();
 
+      // En édition → pas d’overlay (laisser handles/layout)
+      if (editing) return;
+
       if (isAllowed) {
         if (this._config.show_user) {
-          // Ajoute un badge discret sur le PREMIER ha-card trouvé (s'il y en a)
-          const cards = this._findAllHaCards(innerCard);
+          const cards = this._findAllHaCards(this._innerCard);
           const hc = cards[0];
           if (hc) {
             this._addOverlayInside(hc, {
@@ -235,13 +268,6 @@
               opacity: 0,
               showLock: false
             });
-          } else {
-            const badge = document.createElement("div");
-            badge.textContent = `Utilisateur: ${user.name || "(inconnu)"}`;
-            badge.style.fontSize = "12px";
-            badge.style.opacity = "0.72";
-            badge.style.margin = "4px 8px";
-            root.insertBefore(badge, innerCard);
           }
         }
         return;
@@ -252,20 +278,40 @@
         return;
       }
 
-      if (!editing) {
-        // 🔒 NON AUTORISÉ : overlay sur TOUTES les sous-cartes
-        const cards = this._findAllHaCards(innerCard);
-        if (cards.length === 0) return; // rien trouvé (rare)
-        cards.forEach((hc, idx) => {
-          this._addOverlayInside(hc, {
-            showBadge: !!this._config.show_user && idx === 0, // badge sur la 1ère carte seulement
-            badgeText: `Utilisateur: ${user.name || "(inconnu)"}`,
-            opacity: this._config.overlay_opacity,
-            showLock: true
-          });
+      // Non autorisé : overlay sur chaque sous-carte (stacks ok)
+      const cards = this._findAllHaCards(this._innerCard);
+      cards.forEach((hc, idx) => {
+        this._addOverlayInside(hc, {
+          showBadge: !!this._config.show_user && idx === 0,
+          badgeText: `Utilisateur: ${user.name || "(inconnu)"}`,
+          opacity: this._config.overlay_opacity,
+          showLock: true
         });
-      }
-      // En édition → aucun overlay (mise en page OK).
+      });
+    }
+
+    // ---------- Build ----------
+
+    async _build() {
+      // reset watchers/overlays
+      this.disconnectedCallback();
+
+      this._built = true;
+      const root = this.shadowRoot;
+      root.innerHTML = "";
+
+      const innerCard = await createInnerCard(this._config.card, this._hass);
+      this._innerCard = innerCard;
+      root.appendChild(innerCard);
+
+      // Observe basiquement le mode édition
+      this._watchEditMode();
+
+      // Premier pont de layout
+      this._updateLayoutBridge();
+
+      // Applique l’état (autorisé/verrouillé)
+      this._applyLockState();
     }
   }
 
