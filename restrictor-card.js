@@ -1,26 +1,20 @@
-// Restrictor Card — v1.1 (robuste re-lock)
-// - Re-lock automatique sur mutations du DOM (area card, images, etc.)
-// - Re-lock sur changement de vue / visibilité
-// - Rafale de retries pour les rendus async
-// - Overlay OFF en mode édition, stacks supportés
+// Restrictor Card — v1.0
+// - Bandeau "Recharger les ressources ?" après mise à jour (ll-reload-resources)
+// - Verrouillage robuste (Area + stacks), ré-applique sur mutations / navigation / visibilité
+// - Overlay OFF en mode édition (vue Sections)
 // - Filtrage par NOM d’utilisateur (insensible à la casse)
-// - Support grid_options (rows/columns) + alias; priorité à view_layout de l'éditeur
+// - Support grid_options (rows/columns) + alias; priorité à view_layout de l’éditeur
 
 // === Reload prompt after update ===
-const RESTRICTOR_VERSION = "1.1";  // <-- mets ici la version du fichier
+const RESTRICTOR_VERSION = "1.0.0";
 try {
   const KEY = "restrictor_card_version";
-  const previous = localStorage.getItem(KEY);
-  if (previous && previous !== RESTRICTOR_VERSION) {
-    // Demande à HA d’afficher le bandeau “Recharger les ressources ?”
+  const prev = localStorage.getItem(KEY);
+  if (prev && prev !== RESTRICTOR_VERSION) {
     window.dispatchEvent(new Event("ll-reload-resources"));
   }
   localStorage.setItem(KEY, RESTRICTOR_VERSION);
-} catch (e) {
-  // si localStorage n’est pas dispo, on ignore silencieusement
-}
-
-
+} catch (_) {}
 
 (function () {
 
@@ -84,10 +78,12 @@ try {
         mode: config.mode || (config.read_only ? "read_only" : "read_only"), // "read_only" | "hidden"
         overlay_opacity: typeof config.overlay_opacity === "number" ? config.overlay_opacity : 0.0,
         show_user: !!config.show_user,
-        view_layout: config.view_layout,     // priorité à l'éditeur
-        grid_options: config.grid_options,   // support manuel
+        // mise en page
+        view_layout: config.view_layout,      // écrit par l’éditeur (prioritaire)
+        grid_options: config.grid_options,    // { rows, columns }
         grid_rows: config.grid_rows ?? config.rows,
         grid_columns: config.grid_columns ?? config.columns,
+        // carte réelle
         card: config.card,
       };
       this._built = false;
@@ -100,7 +96,7 @@ try {
       if (this._innerCard && this._innerCard.hass !== hass) {
         try { this._innerCard.hass = hass; } catch {}
       }
-      // Quand hass change (états), re-lock décalé
+      // re-lock décalé quand hass met à jour les états
       this._scheduleReapply("hass-update");
     }
 
@@ -116,11 +112,14 @@ try {
     }
 
     // ---------------- Layout (Sections) ----------------
+    // Règles:
+    // 1) si view_layout existe (posé par l’éditeur) → laisser HA décider (undefined)
+    // 2) sinon, utiliser grid_options / alias
+    // 3) sinon, relayer getLayoutOptions de la carte interne si dispo
+    // 4) sinon, fallback neutre {}
     getLayoutOptions() {
-      // 1) l'éditeur visuel a la priorité
       if (this._config?.view_layout) return undefined;
 
-      // 2) grid_options / alias
       const go = this._config?.grid_options || {};
       const rows = Number(this._config?.grid_rows ?? go.rows);
       const cols = Number(this._config?.grid_columns ?? go.columns);
@@ -133,12 +132,10 @@ try {
         return obj;
       }
 
-      // 3) relayer la carte interne si possible
       if (this._innerCard && typeof this._innerCard.getLayoutOptions === "function") {
         try { return this._innerCard.getLayoutOptions(); } catch {}
       }
 
-      // 4) fallback neutre (évite disparition)
       return {};
     }
 
@@ -208,7 +205,6 @@ try {
 
     _clearReapplyTimer() { if (this._reapplyTimer) { clearTimeout(this._reapplyTimer); this._reapplyTimer = null; } }
     _scheduleReapply(reason) {
-      // Débouncer + rafale de retries pour couvrir les re-render async
       this._clearReapplyTimer();
       const tries = [0, 50, 200, 600];
       let i = 0;
