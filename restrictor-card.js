@@ -1,10 +1,14 @@
-// Restrictor Card — v0.10 (Sections-ready)
-// - Overlay désactivé en édition (détection robuste via MutationObserver)
-// - Injection dans ha-card interne (pas de wrapper) → compatible Sections
+// Restrictor Card — v0.11
+// - Overlay injecté dans le ha-card interne (pas de wrapper) → compatible Sections
+// - Overlay désactivé en mode édition (détection robuste)
 // - Filtrage par nom d’utilisateur (insensible à la casse)
 // - Badge utilisateur (nom uniquement) si show_user: true
+// - NEW: allow_navigation_when_locked → laisse passer la navigation en read_only
+// - NEW: console_debug → logs console
 
 (function () {
+
+  const log = (...a) => console.info("[restrictor-card v0.11]", ...a);
 
   async function getUserFromApi() {
     try {
@@ -56,6 +60,8 @@
         mode: config.mode || (config.read_only ? "read_only" : "read_only"), // "read_only" | "hidden"
         overlay_opacity: typeof config.overlay_opacity === "number" ? config.overlay_opacity : 0.0,
         show_user: !!config.show_user,
+        allow_navigation_when_locked: !!config.allow_navigation_when_locked, // NEW
+        console_debug: !!config.console_debug, // NEW
         card: config.card,
       };
       this._built = false;
@@ -77,9 +83,7 @@
       this._editObserver = null;
     }
 
-    getCardSize() {
-      return this._innerCard?.getCardSize?.() ?? 3;
-    }
+    getCardSize() { return this._innerCard?.getCardSize?.() ?? 3; }
 
     _norm(s) { return String(s ?? "").trim().toLowerCase(); }
 
@@ -89,13 +93,9 @@
       return await getUserFromApi();
     }
 
-    // Détection robuste du mode édition (Masonry, Sections, etc.)
     _computeEditMode() {
-      // 1) API moderne
       if (this._hass && typeof this._hass.editMode === "boolean") return this._hass.editMode;
-      // 2) Classe globale sur le body
       if (document.body.classList.contains("edit-mode")) return true;
-      // 3) Attributs sur le hui-view/hui-root
       try {
         const huiRoot = document.querySelector("home-assistant")?.shadowRoot
           ?.querySelector("ha-panel-lovelace")?.shadowRoot
@@ -114,7 +114,7 @@
         const now = this._computeEditMode();
         if (now !== this._lastEditState) {
           this._lastEditState = now;
-          this._build(); // re-render sans overlay en édition
+          this._build();
         }
       });
       this._editObserver.observe(target, { attributes: true, subtree: true, attributeFilter: ["class"] });
@@ -129,13 +129,13 @@
       return null;
     }
 
-    _addOverlayInside(targetHaCard, { showBadge, badgeText, opacity, showLock }) {
+    _addOverlayInside(targetHaCard, { showBadge, badgeText, opacity, showLock, allowNav, navPath }) {
       const overlay = document.createElement("div");
       overlay.className = "restrictor-overlay";
       overlay.style.position = "absolute";
       overlay.style.inset = "0";
       overlay.style.zIndex = "10";
-      overlay.style.cursor = "not-allowed";
+      overlay.style.cursor = allowNav ? "pointer" : "not-allowed";
       overlay.style.background = `rgba(0,0,0,${opacity || 0})`;
 
       const computed = getComputedStyle(targetHaCard);
@@ -144,14 +144,37 @@
       }
 
       const stop = e => { e.stopPropagation(); e.preventDefault(); };
+
+      // Bloque tout…
       [
-        "click","mousedown","mouseup","touchstart","touchend","pointerdown",
+        "mousedown","mouseup","touchstart","touchend","pointerdown",
         "pointerup","change","input","keydown","keyup","contextmenu"
       ].forEach(ev => {
         const h = e => stop(e);
         overlay.addEventListener(ev, h, true);
         this._cleanup.push(() => overlay.removeEventListener(ev, h, true));
       });
+
+      // …sauf le clic qui peut déclencher une navigation si activée
+      const onClick = (e) => {
+        stop(e);
+        if (allowNav && navPath) {
+          try {
+            // tentative de navigation "ha-style"
+            const event = new Event("location-changed", { bubbles: true, composed: true });
+            if (window.history && window.history.pushState) {
+              window.history.pushState(null, "", navPath);
+              window.dispatchEvent(event);
+            } else {
+              window.location.assign(navPath);
+            }
+          } catch {
+            window.location.assign(navPath);
+          }
+        }
+      };
+      overlay.addEventListener("click", onClick, true);
+      this._cleanup.push(() => overlay.removeEventListener("click", onClick, true));
 
       if (showLock) {
         const lockEl = document.createElement("div");
@@ -182,7 +205,7 @@
     }
 
     async _build() {
-      // cleanup
+      // cleanup + watcher edit
       this.disconnectedCallback();
       this._watchEditMode();
 
@@ -194,12 +217,11 @@
       this._innerCard = innerCard;
       root.appendChild(innerCard);
 
-      // Besoin utilisateur ?
       const needUser = this._config.show_user || this._config.allowed_users.length > 0;
       let user = { id: "", name: "" };
       if (needUser) user = await this._getCurrentUser();
 
-      // Autorisation par nom (insensible à la casse)
+      // autorisation par nom
       let isAllowed = true;
       if (this._config.allowed_users.length > 0) {
         const uname = this._norm(user.name);
@@ -208,9 +230,11 @@
       }
 
       const editing = this._computeEditMode();
+      if (this._config.console_debug) {
+        log("editMode:", editing, "user:", user.name, "isAllowed:", isAllowed);
+      }
 
       if (isAllowed) {
-        // Autorisé → pas d’overlay (sauf badge visuel facultatif)
         if (this._config.show_user) {
           const hc = this._findHaCard(innerCard);
           if (hc) {
@@ -218,7 +242,9 @@
               showBadge: true,
               badgeText: `Utilisateur: ${user.name || "(inconnu)"}`,
               opacity: 0,
-              showLock: false
+              showLock: false,
+              allowNav: false,
+              navPath: null
             });
           } else {
             const badge = document.createElement("div");
@@ -245,11 +271,13 @@
             showBadge: !!this._config.show_user,
             badgeText: `Utilisateur: ${user.name || "(inconnu)"}`,
             opacity: this._config.overlay_opacity,
-            showLock: true
+            showLock: true,
+            allowNav: this._config.allow_navigation_when_locked,
+            navPath: this._config.card?.navigation_path || null
           });
         }
       }
-      // En édition → aucun overlay, pour que la mise en page fonctionne.
+      // En édition → aucun overlay.
     }
   }
 
