@@ -1,34 +1,10 @@
-// Restrictor Card — v1.0.1
-// - Bandeau "Recharger les ressorces ?" fiable après update (ll-reload-resources)
-// - Verrouillage robuste (Area + stacks), ré-applique sur mutations / navigation / visibilité
-// - Overlay OFF en mode édition (vue Sections)
+// Restrictor Card — v1.0 (robuste re-lock)
+// - Re-lock automatique sur mutations du DOM (area card, images, etc.)
+// - Re-lock sur changement de vue / visibilité
+// - Rafale de retries pour les rendus async
+// - Overlay OFF en mode édition, stacks supportés
 // - Filtrage par NOM d’utilisateur (insensible à la casse)
-// - Support grid_options (rows/columns) + alias; priorité à view_layout de l’éditeur
-
-// === Reload prompt after update (deferred to ensure Lovelace listens) ===
-const RESTRICTOR_VERSION = "1.0.1";  // ⬅️ incrémente à chaque release
-try {
-  const KEY = "restrictor_card_version";
-  const previous = localStorage.getItem(KEY);
-
-  if (previous && previous !== RESTRICTOR_VERSION) {
-    const triggerReloadBanner = () => {
-      try {
-        window.dispatchEvent(new Event("ll-reload-resources"));
-      } catch (e) {
-        // fallback silencieux
-      }
-    };
-    if (document.readyState === "loading") {
-      document.addEventListener("DOMContentLoaded", () => setTimeout(triggerReloadBanner, 500));
-    } else {
-      setTimeout(triggerReloadBanner, 1000); // s'assure que Lovelace a attaché ses listeners
-    }
-  }
-  localStorage.setItem(KEY, RESTRICTOR_VERSION);
-} catch (e) {
-  console.warn("[RestrictorCard] Reload banner error:", e);
-}
+// - Support grid_options (rows/columns) + alias; priorité à view_layout de l'éditeur
 
 (function () {
 
@@ -92,12 +68,10 @@ try {
         mode: config.mode || (config.read_only ? "read_only" : "read_only"), // "read_only" | "hidden"
         overlay_opacity: typeof config.overlay_opacity === "number" ? config.overlay_opacity : 0.0,
         show_user: !!config.show_user,
-        // mise en page :
-        view_layout: config.view_layout,      // écrit par l’éditeur (prioritaire)
-        grid_options: config.grid_options,    // { rows, columns }
+        view_layout: config.view_layout,     // priorité à l'éditeur
+        grid_options: config.grid_options,   // support manuel
         grid_rows: config.grid_rows ?? config.rows,
         grid_columns: config.grid_columns ?? config.columns,
-        // carte réelle :
         card: config.card,
       };
       this._built = false;
@@ -110,7 +84,7 @@ try {
       if (this._innerCard && this._innerCard.hass !== hass) {
         try { this._innerCard.hass = hass; } catch {}
       }
-      // re-lock décalé quand hass met à jour les états
+      // Quand hass change (états), re-lock décalé
       this._scheduleReapply("hass-update");
     }
 
@@ -126,14 +100,11 @@ try {
     }
 
     // ---------------- Layout (Sections) ----------------
-    // Priorités:
-    // 1) view_layout (posé par l’éditeur) → laisser HA décider (undefined)
-    // 2) grid_options/alias → renvoyer {grid_rows, grid_columns}
-    // 3) si la carte interne expose getLayoutOptions → relayer
-    // 4) sinon → {} (neutre)
     getLayoutOptions() {
+      // 1) l'éditeur visuel a la priorité
       if (this._config?.view_layout) return undefined;
 
+      // 2) grid_options / alias
       const go = this._config?.grid_options || {};
       const rows = Number(this._config?.grid_rows ?? go.rows);
       const cols = Number(this._config?.grid_columns ?? go.columns);
@@ -146,10 +117,12 @@ try {
         return obj;
       }
 
+      // 3) relayer la carte interne si possible
       if (this._innerCard && typeof this._innerCard.getLayoutOptions === "function") {
         try { return this._innerCard.getLayoutOptions(); } catch {}
       }
 
+      // 4) fallback neutre (évite disparition)
       return {};
     }
 
@@ -218,7 +191,8 @@ try {
     }
 
     _clearReapplyTimer() { if (this._reapplyTimer) { clearTimeout(this._reapplyTimer); this._reapplyTimer = null; } }
-    _scheduleReapply() {
+    _scheduleReapply(reason) {
+      // Débouncer + rafale de retries pour couvrir les re-render async
       this._clearReapplyTimer();
       const tries = [0, 50, 200, 600];
       let i = 0;
@@ -316,7 +290,7 @@ try {
       // nettoie
       this._clearOverlays();
 
-      // utilisateur (si nécessaire)
+      // utilisateur
       const needUser = this._config.show_user || (this._config.allowed_users?.length > 0);
       let user = { id: "", name: "" };
       if (needUser) user = await this._getCurrentUser();
@@ -329,7 +303,7 @@ try {
         isAllowed = names.includes(uname);
       }
 
-      // édition → jamais d’overlay
+      // édition
       if (this._isEditMode()) return;
 
       if (isAllowed) {
