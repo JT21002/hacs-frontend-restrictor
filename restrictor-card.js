@@ -1,4 +1,4 @@
-// Restrictor Card — v1.1
+// Restrictor Card — v1.1.0
 // Changelog vs v1.0.x :
 //  - FIX: timer storm sur set hass() — debounce 150ms, plus de rafale 0/50/200/600
 //  - FIX: display:none jamais réinitialisé en mode hidden → reset correct
