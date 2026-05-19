@@ -1,4 +1,4 @@
-// Restrictor Card — v1.0.2 (no reload-banner)
+// Restrictor Card — v1.0.3 (no reload-banner)
 // - Verrouillage robuste (Area + stacks), ré-applique sur mutations / navigation / visibilité
 // - Overlay OFF en mode édition (vue Sections)
 // - Filtrage par NOM d’utilisateur (insensible à la casse)
