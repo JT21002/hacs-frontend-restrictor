@@ -1,52 +1,51 @@
-// Restrictor Card — v1.1.0
-// Changelog vs v1.0.x :
-//  - FIX: timer storm sur set hass() — debounce 150ms, plus de rafale 0/50/200/600
-//  - FIX: display:none jamais réinitialisé en mode hidden → reset correct
-//  - FIX: _userCache invalidé quand hass.user change (détection par nom+id)
-//  - FIX: disconnectedCallback() n'est plus utilisé comme reset interne → _reset() dédié
-//  - FIX: bug ternaire mode dans setConfig (read_only: false ignoré)
-//  - FIX: getLayoutOptions() ne retourne plus undefined → retourne {} si view_layout présent
-//  - FIX: overlay opacity:0 sur user autorisé ne bloque plus les events (pointer-events:none)
-//  - OPT: _findAllHaCards limité à depth 4 (suffisant pour stacks HA)
-//  - OPT: _applyLockState skipé si rien n'a changé (même user, même état edit)
+// Restrictor Card — v1.2
+// Changelog vs v1.1 :
+//  - NEW: éditeur graphique natif HA (getConfigElement + getStubConfig)
+//         → liste déroulante des utilisateurs chargée depuis /api/config/auth/users
+//         → sélecteur de carte interne via ha-card-picker
+//         → tous les paramètres configurables sans YAML
 
-// ─── Reload banner après mise à jour ────────────────────────────────────────
-const RESTRICTOR_VERSION = "1.1.0";
+// ─── Reload banner ───────────────────────────────────────────────────────────
+const RESTRICTOR_VERSION = "1.2.0";
 try {
   const KEY = "restrictor_card_version";
   const prev = localStorage.getItem(KEY);
   if (prev && prev !== RESTRICTOR_VERSION) {
-    const fire = () => {
-      try { window.dispatchEvent(new Event("ll-reload-resources")); } catch {}
-    };
+    const fire = () => { try { window.dispatchEvent(new Event("ll-reload-resources")); } catch {} };
     document.readyState === "loading"
       ? document.addEventListener("DOMContentLoaded", () => setTimeout(fire, 500))
       : setTimeout(fire, 1000);
   }
   localStorage.setItem(KEY, RESTRICTOR_VERSION);
 } catch {}
-// ────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 
 (function () {
 
-  // ── Helpers globaux ────────────────────────────────────────────────────────
+  // ── Helpers partagés ────────────────────────────────────────────────────────
 
   async function getUserFromApi() {
     try {
       const r = await fetch("/api/user", { credentials: "same-origin" });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      return await r.json(); // { id, name, is_admin, ... }
-    } catch {
-      return { id: "", name: "" };
-    }
+      return await r.json();
+    } catch { return { id: "", name: "" }; }
+  }
+
+  // Charge la liste de tous les utilisateurs HA (nécessite admin ou token valide)
+  async function fetchAllUsers() {
+    try {
+      const r = await fetch("/api/config/auth/users", { credentials: "same-origin" });
+      if (!r.ok) throw new Error();
+      const data = await r.json();
+      return Array.isArray(data) ? data.filter(u => u.is_active !== false) : [];
+    } catch { return []; }
   }
 
   function makeErrorCard(message, origConfig) {
     const el = document.createElement("hui-error-card");
-    try {
-      el.setConfig({ type: "error", error: message, origConfig: origConfig || {} });
-      return el;
-    } catch {
+    try { el.setConfig({ type: "error", error: message, origConfig: origConfig || {} }); return el; }
+    catch {
       const c = document.createElement("ha-card");
       c.style.padding = "12px";
       c.style.color = "var(--error-color,#db4437)";
@@ -64,57 +63,360 @@ try {
         return card;
       }
     } catch {}
-    const fallback = makeErrorCard(
-      "Helpers non disponibles — vider le cache (Ctrl+F5).",
-      config
-    );
+    const fallback = makeErrorCard("Helpers non disponibles — vider le cache (Ctrl+F5).", config);
     fallback.hass = hass;
     return fallback;
   }
 
-  // ── Classe principale ──────────────────────────────────────────────────────
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ÉDITEUR GRAPHIQUE
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  class RestrictorCardEditor extends HTMLElement {
+    constructor() {
+      super();
+      this.attachShadow({ mode: "open" });
+      this._config = {};
+      this._hass   = null;
+      this._users  = [];
+      this._ready  = false;
+    }
+
+    set hass(hass) {
+      this._hass = hass;
+      if (!this._ready) this._init();
+    }
+
+    setConfig(config) {
+      this._config = { ...config };
+      if (this._ready) this._render();
+    }
+
+    async _init() {
+      this._ready = true;
+      this._users = await fetchAllUsers();
+      this._render();
+    }
+
+    _fire(newConfig) {
+      this.dispatchEvent(new CustomEvent("config-changed", {
+        detail: { config: newConfig },
+        bubbles: true,
+        composed: true,
+      }));
+    }
+
+    _render() {
+      const cfg          = this._config;
+      const allowedUsers = Array.isArray(cfg.allowed_users) ? cfg.allowed_users : [];
+      const mode         = cfg.mode || "read_only";
+      const opacity      = typeof cfg.overlay_opacity === "number" ? cfg.overlay_opacity : 0;
+      const showUser     = !!cfg.show_user;
+      const gridRows     = cfg.grid_options?.rows    ?? cfg.grid_rows    ?? "";
+      const gridCols     = cfg.grid_options?.columns ?? cfg.grid_columns ?? "";
+
+      const userOptions = this._users.length > 0
+        ? this._users.map(u =>
+            `<option value="${this._esc(u.name)}" ${allowedUsers.includes(u.name) ? "selected" : ""}>` +
+            `${this._esc(u.name)}${u.is_admin ? " (admin)" : ""}</option>`
+          ).join("")
+        : `<option disabled>Chargement des utilisateurs…</option>`;
+
+      this.shadowRoot.innerHTML = `
+        <style>
+          :host {
+            display: block;
+            font-family: var(--paper-font-body1_-_font-family, sans-serif);
+          }
+          .section { margin-bottom: 16px; }
+          .section-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--secondary-text-color);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 8px;
+          }
+          .row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 10px;
+          }
+          .row label {
+            flex: 0 0 160px;
+            font-size: 14px;
+            color: var(--primary-text-color);
+          }
+          select, input[type="number"], input[type="range"] {
+            flex: 1;
+            padding: 6px 8px;
+            border-radius: 6px;
+            border: 1px solid var(--divider-color, #e0e0e0);
+            background: var(--card-background-color, #fff);
+            color: var(--primary-text-color);
+            font-size: 14px;
+          }
+          select[multiple] {
+            height: auto;
+            min-height: 90px;
+            padding: 4px;
+          }
+          select[multiple] option {
+            padding: 5px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+          }
+          select[multiple] option:checked {
+            background: var(--primary-color, #03a9f4);
+            color: #fff;
+          }
+          .hint {
+            font-size: 11px;
+            color: var(--secondary-text-color);
+            margin-top: -4px;
+            margin-bottom: 8px;
+            margin-left: 172px;
+          }
+          .toggle-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 6px 0;
+          }
+          .toggle-row label {
+            font-size: 14px;
+            color: var(--primary-text-color);
+          }
+          .opacity-row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 10px;
+            transition: opacity .2s;
+          }
+          .opacity-row label {
+            flex: 0 0 160px;
+            font-size: 14px;
+            color: var(--primary-text-color);
+          }
+          .opacity-value {
+            font-size: 13px;
+            color: var(--secondary-text-color);
+            min-width: 34px;
+            text-align: right;
+          }
+          .no-card-warning {
+            padding: 10px 12px;
+            background: rgba(255,152,0,.12);
+            border-left: 3px solid var(--warning-color, #ff9800);
+            border-radius: 4px;
+            font-size: 13px;
+            color: var(--primary-text-color);
+            margin-bottom: 14px;
+          }
+          hr {
+            border: none;
+            border-top: 1px solid var(--divider-color, #e0e0e0);
+            margin: 16px 0;
+          }
+          .card-picker-wrap { margin-top: 4px; }
+        </style>
+
+        ${!cfg.card ? `<div class="no-card-warning">⚠️ Aucune carte configurée — sélectionnez une carte ci-dessous.</div>` : ""}
+
+        <!-- Carte interne -->
+        <div class="section">
+          <div class="section-title">Carte à protéger</div>
+          <div class="card-picker-wrap" id="card-picker-container"></div>
+        </div>
+
+        <hr>
+
+        <!-- Contrôle d'accès -->
+        <div class="section">
+          <div class="section-title">Contrôle d'accès</div>
+
+          <div class="row">
+            <label>Utilisateurs autorisés</label>
+            <select id="allowed-users" multiple>${userOptions}</select>
+          </div>
+          <div class="hint">Ctrl+clic (ou Cmd+clic) pour sélectionner plusieurs. Vide = tout le monde peut interagir.</div>
+
+          <div class="row" style="margin-top:8px">
+            <label>Mode de restriction</label>
+            <select id="mode">
+              <option value="read_only" ${mode === "read_only" ? "selected" : ""}>🔒 Lecture seule (visible, verrouillée)</option>
+              <option value="hidden"    ${mode === "hidden"    ? "selected" : ""}>👁️ Cachée (invisible pour non-autorisés)</option>
+            </select>
+          </div>
+
+          <div class="opacity-row" id="opacity-row" style="${mode === "hidden" ? "opacity:.4;pointer-events:none" : ""}">
+            <label>Opacité du verrou</label>
+            <input type="range" id="opacity" min="0" max="0.6" step="0.05" value="${opacity}">
+            <span class="opacity-value" id="opacity-display">${Math.round(opacity * 100)}%</span>
+          </div>
+        </div>
+
+        <hr>
+
+        <!-- Affichage -->
+        <div class="section">
+          <div class="section-title">Affichage</div>
+          <div class="toggle-row">
+            <label>Afficher le nom de l'utilisateur connecté</label>
+            <ha-switch id="show-user" ${showUser ? "checked" : ""}></ha-switch>
+          </div>
+        </div>
+
+        <hr>
+
+        <!-- Mise en page -->
+        <div class="section">
+          <div class="section-title">Mise en page (vue Sections)</div>
+          <div class="row">
+            <label>Lignes</label>
+            <input type="number" id="grid-rows" min="1" max="12" step="1" value="${gridRows}" placeholder="auto">
+          </div>
+          <div class="row">
+            <label>Colonnes</label>
+            <input type="number" id="grid-cols" min="1" max="12" step="1" value="${gridCols}" placeholder="auto">
+          </div>
+          <div class="hint">Laisser vide = taille automatique.</div>
+        </div>
+      `;
+
+      this._injectCardPicker();
+      this._attachListeners();
+    }
+
+    _injectCardPicker() {
+      const container = this.shadowRoot.getElementById("card-picker-container");
+      if (!container) return;
+      const picker = document.createElement("ha-card-picker");
+      picker.hass  = this._hass;
+      if (this._config.card?.type) picker.value = this._config.card.type;
+      picker.addEventListener("value-changed", (e) => {
+        const cardType = e.detail?.value;
+        if (!cardType) return;
+        const newConfig = { ...this._config, card: { type: cardType } };
+        this._config = newConfig;
+        this._fire(newConfig);
+      });
+      container.appendChild(picker);
+    }
+
+    _attachListeners() {
+      const root = this.shadowRoot;
+
+      root.getElementById("allowed-users")?.addEventListener("change", (e) => {
+        const selected  = Array.from(e.target.selectedOptions).map(o => o.value);
+        const newConfig = { ...this._config, allowed_users: selected };
+        this._config = newConfig;
+        this._fire(newConfig);
+      });
+
+      root.getElementById("mode")?.addEventListener("change", (e) => {
+        const newMode    = e.target.value;
+        const opRow      = root.getElementById("opacity-row");
+        if (opRow) {
+          opRow.style.opacity       = newMode === "hidden" ? "0.4" : "1";
+          opRow.style.pointerEvents = newMode === "hidden" ? "none" : "";
+        }
+        const newConfig = { ...this._config, mode: newMode };
+        this._config = newConfig;
+        this._fire(newConfig);
+      });
+
+      const opInput   = root.getElementById("opacity");
+      const opDisplay = root.getElementById("opacity-display");
+      opInput?.addEventListener("input", (e) => {
+        if (opDisplay) opDisplay.textContent = `${Math.round(parseFloat(e.target.value) * 100)}%`;
+      });
+      opInput?.addEventListener("change", (e) => {
+        const newConfig = { ...this._config, overlay_opacity: parseFloat(e.target.value) };
+        this._config = newConfig;
+        this._fire(newConfig);
+      });
+
+      root.getElementById("show-user")?.addEventListener("change", (e) => {
+        const newConfig = { ...this._config, show_user: e.target.checked };
+        this._config = newConfig;
+        this._fire(newConfig);
+      });
+
+      root.getElementById("grid-rows")?.addEventListener("change", (e) => {
+        const val = parseInt(e.target.value);
+        const go  = { ...(this._config.grid_options || {}) };
+        if (!isNaN(val) && val > 0) go.rows = val; else delete go.rows;
+        const newConfig = { ...this._config, grid_options: go };
+        this._config = newConfig;
+        this._fire(newConfig);
+      });
+
+      root.getElementById("grid-cols")?.addEventListener("change", (e) => {
+        const val = parseInt(e.target.value);
+        const go  = { ...(this._config.grid_options || {}) };
+        if (!isNaN(val) && val > 0) go.columns = val; else delete go.columns;
+        const newConfig = { ...this._config, grid_options: go };
+        this._config = newConfig;
+        this._fire(newConfig);
+      });
+    }
+
+    _esc(str) {
+      return String(str ?? "").replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;");
+    }
+  }
+
+  if (!customElements.get("restrictor-card-editor")) {
+    customElements.define("restrictor-card-editor", RestrictorCardEditor);
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // CARTE PRINCIPALE
+  // ═══════════════════════════════════════════════════════════════════════════
 
   class RestrictorCard extends HTMLElement {
     constructor() {
       super();
       this.attachShadow({ mode: "open" });
-
-      this._hass        = null;
-      this._config      = null;
-      this._innerCard   = null;
-      this._built       = false;
-
-      // nettoyage / observers
-      this._evtCleanup    = [];   // listeners sur les overlays
+      this._hass          = null;
+      this._config        = null;
+      this._innerCard     = null;
+      this._built         = false;
+      this._evtCleanup    = [];
       this._editObserver  = null;
       this._domObserver   = null;
       this._visHandlers   = [];
-
-      // debounce
       this._debounceTimer = null;
+      this._userCache     = null;
+      this._userCacheKey  = null;
+      this._lastLockState = null;
+    }
 
-      // cache utilisateur
-      this._userCache     = null; // { id, name }
-      this._userCacheKey  = null; // clé pour invalider (id+name depuis hass.user)
+    // ── API éditeur ──────────────────────────────────────────────────────────
 
-      // état précédent pour skip inutiles
-      this._lastLockState = null; // "allowed" | "locked" | "hidden" | "edit"
-      this._lastHidden    = false;
+    static getConfigElement() {
+      return document.createElement("restrictor-card-editor");
+    }
+
+    static getStubConfig() {
+      return {
+        card:            { type: "entities", entities: [] },
+        allowed_users:   [],
+        mode:            "read_only",
+        overlay_opacity: 0,
+        show_user:       false,
+      };
     }
 
     // ── setConfig ────────────────────────────────────────────────────────────
 
     setConfig(config) {
       if (!config?.card) throw new Error('Restrictor Card: clé "card" manquante.');
-
-      // FIX: ternaire bugué → on lit config.mode d'abord, fallback read_only
       let mode = "read_only";
-      if (config.mode === "hidden" || config.mode === "read_only") {
-        mode = config.mode;
-      } else if (config.read_only === false) {
-        // explicitement désactivé (cas rare mais possible)
-        mode = "read_only";
-      }
+      if (config.mode === "hidden" || config.mode === "read_only") mode = config.mode;
 
       this._config = {
         allowed_users:   Array.isArray(config.allowed_users) ? config.allowed_users : [],
@@ -127,45 +429,32 @@ try {
         grid_columns:    config.grid_columns ?? config.columns,
         card:            config.card,
       };
-
-      // reset état pour forcer un rebuild
       this._built = false;
       this._lastLockState = null;
       if (this._hass) this._build();
     }
 
-    // ── hass setter ──────────────────────────────────────────────────────────
+    // ── hass ─────────────────────────────────────────────────────────────────
 
     set hass(hass) {
       this._hass = hass;
-
-      // invalider le cache si l'utilisateur a changé dans hass.user
-      const u = hass?.user;
+      const u   = hass?.user;
       const key = u ? `${u.id}|${u.name}` : null;
       if (key !== this._userCacheKey) {
         this._userCache    = null;
         this._userCacheKey = key;
       }
-
-      if (!this._built && this._config) {
-        this._build();
-        return;
-      }
+      if (!this._built && this._config) { this._build(); return; }
       if (this._innerCard && this._innerCard.hass !== hass) {
         try { this._innerCard.hass = hass; } catch {}
       }
-
-      // FIX: debounce 150ms au lieu de rafale 0/50/200/600
       this._scheduleReapply();
     }
 
-    // ── Lifecycle ────────────────────────────────────────────────────────────
+    // ── Lifecycle ─────────────────────────────────────────────────────────────
 
-    disconnectedCallback() {
-      this._reset();
-    }
+    disconnectedCallback() { this._reset(); }
 
-    // _reset() : nettoyage interne (NE PAS appeler disconnectedCallback en interne)
     _reset() {
       this._clearOverlays();
       if (this._editObserver)  { try { this._editObserver.disconnect();  } catch {} this._editObserver  = null; }
@@ -175,12 +464,9 @@ try {
       this._lastLockState = null;
     }
 
-    // ── Layout (Sections) ────────────────────────────────────────────────────
+    // ── Layout ───────────────────────────────────────────────────────────────
 
     getLayoutOptions() {
-      // FIX: ne plus retourner undefined — {} est neutre et ne plante pas HA
-
-      // grid_options / alias définis par l'utilisateur → prioritaires
       const go   = this._config?.grid_options || {};
       const rows = Number(this._config?.grid_rows ?? go.rows);
       const cols = Number(this._config?.grid_columns ?? go.columns);
@@ -192,31 +478,21 @@ try {
         if (hasC) obj.grid_columns = cols;
         return obj;
       }
-
-      // si view_layout est présent (posé par l'éditeur visuel), on laisse HA gérer
-      // mais on retourne {} plutôt que undefined pour éviter des crash
       if (this._config?.view_layout) return {};
-
-      // déléguer à la carte interne si elle sait
       if (this._innerCard && typeof this._innerCard.getLayoutOptions === "function") {
         try { return this._innerCard.getLayoutOptions() ?? {}; } catch {}
       }
-
       return {};
     }
 
-    getCardSize() {
-      return this._innerCard?.getCardSize?.() ?? 3;
-    }
+    getCardSize() { return this._innerCard?.getCardSize?.() ?? 3; }
 
-    // ── Helpers internes ─────────────────────────────────────────────────────
+    // ── Helpers ───────────────────────────────────────────────────────────────
 
     _norm(s) { return String(s ?? "").trim().toLowerCase(); }
 
     async _getCurrentUser() {
-      // cache valide ?
       if (this._userCache) return this._userCache;
-
       const u = this._hass?.user;
       if (u && (u.name || u.id)) {
         this._userCache = { id: u.id || "", name: u.name || "" };
@@ -238,7 +514,7 @@ try {
       } catch { return false; }
     }
 
-    // ── Observers ────────────────────────────────────────────────────────────
+    // ── Observers ─────────────────────────────────────────────────────────────
 
     _watchEditMode() {
       if (this._editObserver) return;
@@ -247,9 +523,7 @@ try {
         const now = this._isEditMode();
         if (now !== last) { last = now; this._scheduleReapply(); }
       });
-      this._editObserver.observe(document.body, {
-        attributes: true, subtree: true, attributeFilter: ["class"]
-      });
+      this._editObserver.observe(document.body, { attributes: true, subtree: true, attributeFilter: ["class"] });
     }
 
     _attachDomObserver() {
@@ -258,21 +532,19 @@ try {
       if (this._domObserver) { try { this._domObserver.disconnect(); } catch {} }
       this._domObserver = new MutationObserver(() => this._scheduleReapply());
       this._domObserver.observe(sr, { childList: true, subtree: true });
-      // NOTE: on observe seulement childList (pas attributes) pour réduire le bruit
     }
 
     _attachVisibilityHooks() {
-      const onVis = () => this._scheduleReapply();
-      const onLoc = () => this._scheduleReapply();
-      document.addEventListener("visibilitychange", onVis);
-      window.addEventListener("location-changed", onLoc);
-      window.addEventListener("popstate",          onLoc);
-      window.addEventListener("hashchange",        onLoc);
+      const h = () => this._scheduleReapply();
+      document.addEventListener("visibilitychange", h);
+      window.addEventListener("location-changed",   h);
+      window.addEventListener("popstate",           h);
+      window.addEventListener("hashchange",         h);
       this._visHandlers = [
-        () => document.removeEventListener("visibilitychange", onVis),
-        () => window.removeEventListener("location-changed",   onLoc),
-        () => window.removeEventListener("popstate",           onLoc),
-        () => window.removeEventListener("hashchange",         onLoc),
+        () => document.removeEventListener("visibilitychange", h),
+        () => window.removeEventListener("location-changed",   h),
+        () => window.removeEventListener("popstate",           h),
+        () => window.removeEventListener("hashchange",         h),
       ];
     }
 
@@ -281,24 +553,20 @@ try {
       this._visHandlers = [];
     }
 
-    // ── Debounce (remplace la rafale 0/50/200/600) ───────────────────────────
-
     _cancelDebounce() {
       if (this._debounceTimer) { clearTimeout(this._debounceTimer); this._debounceTimer = null; }
     }
 
     _scheduleReapply() {
       this._cancelDebounce();
-      // 150ms : absorbe les rafales de mises à jour hass, mais reste réactif
       this._debounceTimer = setTimeout(async () => {
         this._debounceTimer = null;
         try { await this._applyLockState(); } catch {}
       }, 150);
     }
 
-    // ── Gestion des overlays ─────────────────────────────────────────────────
+    // ── Overlays ──────────────────────────────────────────────────────────────
 
-    // OPT: depth max 4 (suffisant pour horizontal-stack → card → ha-card)
     _findAllHaCards(el, depth = 0) {
       const out = new Set(), seen = new Set();
       const crawl = (node, d) => {
@@ -333,32 +601,25 @@ try {
         zIndex:        "10",
         cursor:        interactive ? "default" : "not-allowed",
         background:    `rgba(0,0,0,${opacity || 0})`,
-        // FIX: si mode badge seulement (user autorisé), ne pas bloquer les events
         pointerEvents: interactive ? "none" : "auto",
       });
 
       const cs = getComputedStyle(targetHaCard);
       if (!cs.position || cs.position === "static") targetHaCard.style.position = "relative";
 
-      // Bloque les interactions seulement si non-interactif
       if (!interactive) {
         const stop = e => { e.stopPropagation(); e.preventDefault(); };
-        [
-          "click","mousedown","mouseup","touchstart","touchend",
-          "pointerdown","pointerup","change","input","keydown","keyup","contextmenu"
+        ["click","mousedown","mouseup","touchstart","touchend",
+         "pointerdown","pointerup","change","input","keydown","keyup","contextmenu"
         ].forEach(ev => {
           const h = e => stop(e);
           overlay.addEventListener(ev, h, true);
           this._evtCleanup.push(() => overlay.removeEventListener(ev, h, true));
         });
-
         if (showLock) {
           const lock = document.createElement("div");
           lock.textContent = "🔒";
-          Object.assign(lock.style, {
-            position: "absolute", top: "8px", right: "8px",
-            fontSize: "14px", opacity: "0.6",
-          });
+          Object.assign(lock.style, { position:"absolute", top:"8px", right:"8px", fontSize:"14px", opacity:"0.6" });
           overlay.appendChild(lock);
         }
       }
@@ -367,18 +628,10 @@ try {
         const badge = document.createElement("div");
         badge.textContent = badgeText;
         Object.assign(badge.style, {
-          position:      "absolute",
-          top:           "8px",
-          left:          "10px",
-          fontSize:      "11px",
-          opacity:       "0.75",
-          pointerEvents: "none",
-          userSelect:    "none",
-          background:    "rgba(0,0,0,0.45)",
-          color:         "#fff",
-          padding:       "2px 6px",
-          borderRadius:  "4px",
-          lineHeight:    "1.4",
+          position:"absolute", top:"8px", left:"10px",
+          fontSize:"11px", opacity:"0.85", pointerEvents:"none", userSelect:"none",
+          background:"rgba(0,0,0,0.45)", color:"#fff",
+          padding:"2px 6px", borderRadius:"4px", lineHeight:"1.4",
         });
         overlay.appendChild(badge);
       }
@@ -387,51 +640,37 @@ try {
       this._evtCleanup.push(() => { try { targetHaCard.removeChild(overlay); } catch {} });
     }
 
-    // ── Apply lock state ─────────────────────────────────────────────────────
+    // ── Apply lock ────────────────────────────────────────────────────────────
 
     async _applyLockState() {
       if (!this._innerCard) return;
-
       this._clearOverlays();
-
-      // FIX: toujours remettre display à "" avant de décider
       this.style.display = "";
 
       const needUser = this._config.show_user || this._config.allowed_users.length > 0;
       let user = { id: "", name: "" };
       if (needUser) user = await this._getCurrentUser();
 
-      // autorisation
       let isAllowed = true;
       if (this._config.allowed_users.length > 0) {
         const uname = this._norm(user.name);
         isAllowed = this._config.allowed_users.some(x => this._norm(x) === uname);
       }
 
-      // en mode édition → jamais d'overlay, toujours visible
-      if (this._isEditMode()) {
-        this._lastLockState = "edit";
-        return;
-      }
+      if (this._isEditMode()) { this._lastLockState = "edit"; return; }
 
       if (isAllowed) {
         this._lastLockState = "allowed";
         if (this._config.show_user) {
           const first = this._findAllHaCards(this._innerCard)[0];
-          if (first) {
-            this._addOverlayInside(first, {
-              showBadge:   true,
-              badgeText:   user.name || "(inconnu)",
-              opacity:     0,
-              showLock:    false,
-              interactive: true,   // FIX: pointer-events:none, ne bloque rien
-            });
-          }
+          if (first) this._addOverlayInside(first, {
+            showBadge: true, badgeText: user.name || "(inconnu)",
+            opacity: 0, showLock: false, interactive: true,
+          });
         }
         return;
       }
 
-      // non autorisé
       if (this._config.mode === "hidden") {
         this._lastLockState = "hidden";
         this.style.display  = "none";
@@ -451,14 +690,12 @@ try {
       });
     }
 
-    // ── Build ────────────────────────────────────────────────────────────────
+    // ── Build ─────────────────────────────────────────────────────────────────
 
     async _build() {
-      // FIX: utiliser _reset() et non disconnectedCallback()
       this._reset();
       this._built = true;
-
-      const root   = this.shadowRoot;
+      const root = this.shadowRoot;
       root.innerHTML = "";
 
       const inner = await createInnerCard(this._config.card, this._hass);
@@ -469,11 +706,8 @@ try {
       this._attachDomObserver();
       this._attachVisibilityHooks();
 
-      // premier lock immédiat + un retry à 300ms pour les cartes async (area, etc.)
       try { await this._applyLockState(); } catch {}
-      setTimeout(async () => {
-        try { await this._applyLockState(); } catch {}
-      }, 300);
+      setTimeout(async () => { try { await this._applyLockState(); } catch {} }, 300);
     }
   }
 
