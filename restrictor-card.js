@@ -653,3 +653,14 @@ try {
   }
 
 })();
+
+// Enregistrement dans le registre HA — indispensable pour que getConfigElement() soit appelé
+window.customCards = window.customCards || [];
+if (!window.customCards.some(c => c.type === "restrictor-card")) {
+  window.customCards.push({
+    type:        "restrictor-card",
+    name:        "Restrictor Card",
+    description: "Restreint l'accès à une carte selon l'utilisateur connecté.",
+    preview:     false,
+  });
+}
