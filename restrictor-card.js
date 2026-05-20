@@ -32,14 +32,25 @@ try {
     } catch { return { id: "", name: "" }; }
   }
 
-  // Charge la liste de tous les utilisateurs HA (nécessite admin ou token valide)
-  async function fetchAllUsers() {
+  // Charge la liste de tous les utilisateurs HA via WebSocket (méthode correcte en frontend)
+  async function fetchAllUsers(hass) {
     try {
-      const r = await fetch("/api/config/auth/users", { credentials: "same-origin" });
-      if (!r.ok) throw new Error();
-      const data = await r.json();
-      return Array.isArray(data) ? data.filter(u => u.is_active !== false) : [];
-    } catch { return []; }
+      // hass.connection est le WebSocket authentifié — accès garanti sans restriction admin
+      const result = await hass.connection.sendMessagePromise({
+        type: "config/auth/list",
+      });
+      // result est un tableau de { id, name, is_active, is_admin, ... }
+      const list = Array.isArray(result) ? result : (result?.result ?? []);
+      return list.filter(u => u.is_active !== false && u.system_generated !== true);
+    } catch {
+      // Fallback HTTP si le WS échoue (rare)
+      try {
+        const r = await fetch("/api/config/auth/users", { credentials: "same-origin" });
+        if (!r.ok) throw new Error();
+        const data = await r.json();
+        return Array.isArray(data) ? data.filter(u => u.is_active !== false) : [];
+      } catch { return []; }
+    }
   }
 
   function makeErrorCard(message, origConfig) {
@@ -94,7 +105,7 @@ try {
 
     async _init() {
       this._ready = true;
-      this._users = await fetchAllUsers();
+      this._users = await fetchAllUsers(this._hass);
       this._render();
     }
 
@@ -286,23 +297,35 @@ try {
         </div>
       `;
 
-      this._injectCardPicker();
+      this._injectCardPicker();   // async, s'auto-insère quand prêt
       this._attachListeners();
-    }
 
-    _injectCardPicker() {
+    async _injectCardPicker() {
       const container = this.shadowRoot.getElementById("card-picker-container");
       if (!container) return;
+
+      // Attendre que ha-card-picker soit défini (il se charge tardivement dans HA)
+      try {
+        await customElements.whenDefined("ha-card-picker");
+      } catch {}
+
+      // Nettoyer si déjà un picker (re-render)
+      container.innerHTML = "";
+
       const picker = document.createElement("ha-card-picker");
       picker.hass  = this._hass;
+      picker.label = "Type de carte";
       if (this._config.card?.type) picker.value = this._config.card.type;
+
       picker.addEventListener("value-changed", (e) => {
         const cardType = e.detail?.value;
         if (!cardType) return;
+        // On repart sur une config minimale — l'utilisateur complètera via YAML si besoin
         const newConfig = { ...this._config, card: { type: cardType } };
         this._config = newConfig;
         this._fire(newConfig);
       });
+
       container.appendChild(picker);
     }
 
