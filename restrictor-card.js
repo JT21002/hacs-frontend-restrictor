@@ -1,10 +1,10 @@
-// Restrictor Card — v1.2
-// - Éditeur graphique natif HA
-// - Users chargés via WebSocket hass.connection (config/auth/list)
-// - Sélecteur de type de carte (select natif, pas ha-card-picker)
-// - Tous les fixes de la v1.1 inclus
+// Restrictor Card — v1.3
+// - Sélecteur de carte via hui-card-picker (grille visuelle native HA)
+// - Éditeur de carte via hui-card-element-editor (formulaire natif HA)
+// - Users chargés via WebSocket (config/auth/list)
+// - Tous les fixes v1.1 inclus
 
-const RESTRICTOR_VERSION = "1.2.0";
+const RESTRICTOR_VERSION = "1.3.0";
 try {
   const KEY  = "restrictor_card_version";
   const prev = localStorage.getItem(KEY);
@@ -31,7 +31,6 @@ try {
     } catch { return { id: "", name: "" }; }
   }
 
-  // Charge les vrais comptes humains via WebSocket HA
   async function fetchAllUsers(hass) {
     try {
       const result = await hass.connection.sendMessagePromise({ type: "config/auth/list" });
@@ -39,8 +38,7 @@ try {
       return list.filter(u =>
         u.is_active !== false &&
         u.system_generated !== true &&
-        Array.isArray(u.credentials) &&
-        u.credentials.length > 0
+        Array.isArray(u.credentials) && u.credentials.length > 0
       );
     } catch { return []; }
   }
@@ -72,15 +70,6 @@ try {
     return String(str ?? "").replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;");
   }
 
-  // Types de cartes connus (pour le select)
-  const KNOWN_TYPES = [
-    "entities","entity","button","glance","history-graph","light","map","markdown",
-    "media-control","picture","picture-entity","sensor","statistic","thermostat",
-    "tile","weather-forecast","horizontal-stack","vertical-stack","grid",
-    "custom:bubble-card","custom:mushroom-template-card","custom:mini-graph-card",
-    "custom:apexcharts-card","custom:button-card",
-  ];
-
   // ═══════════════════════════════════════════════════════════════════════════
   // ÉDITEUR
   // ═══════════════════════════════════════════════════════════════════════════
@@ -89,14 +78,20 @@ try {
     constructor() {
       super();
       this.attachShadow({ mode: "open" });
-      this._config = {};
-      this._hass   = null;
-      this._users  = [];
-      this._ready  = false;
+      this._config      = {};
+      this._hass        = null;
+      this._users       = [];
+      this._ready       = false;
+      this._cardEditor  = null;   // hui-card-element-editor actif
+      this._showPicker  = false;  // true = on affiche le picker inline
     }
 
     set hass(hass) {
       this._hass = hass;
+      // Propager hass à l'éditeur de carte si présent
+      if (this._cardEditor) {
+        try { this._cardEditor.hass = hass; } catch {}
+      }
       if (!this._ready) this._init();
     }
 
@@ -117,6 +112,8 @@ try {
       }));
     }
 
+    // ── Render principal ──────────────────────────────────────────────────────
+
     _render() {
       const cfg          = this._config;
       const allowedUsers = Array.isArray(cfg.allowed_users) ? cfg.allowed_users : [];
@@ -126,34 +123,13 @@ try {
       const gridRows     = cfg.grid_options?.rows    ?? cfg.grid_rows    ?? "";
       const gridCols     = cfg.grid_options?.columns ?? cfg.grid_columns ?? "";
       const currentType  = cfg.card?.type || "";
-      const isCustom     = currentType && !KNOWN_TYPES.includes(currentType);
 
-      // Options utilisateurs
       const userOptions = this._users.length > 0
         ? this._users.map(u =>
-            `<option value="${esc(u.name)}" ${allowedUsers.includes(u.name) ? "selected" : ""}>`+
-            `${esc(u.name)}${u.is_owner ? " 👑" : u.is_admin ? " (admin)" : ""}</option>`
+            `<option value="${esc(u.name)}" ${allowedUsers.includes(u.name) ? "selected":""}>` +
+            `${esc(u.name)}${u.is_owner ? " 👑" : u.is_admin ? " (admin)":""}</option>`
           ).join("")
         : `<option disabled>Aucun utilisateur trouvé</option>`;
-
-      // Options type de carte
-      const nativeTypes = [
-        ["entities","Entities"],["entity","Entity"],["button","Button"],["glance","Glance"],
-        ["history-graph","History Graph"],["light","Light"],["map","Map"],["markdown","Markdown"],
-        ["media-control","Media Control"],["picture","Picture"],["picture-entity","Picture Entity"],
-        ["sensor","Sensor"],["statistic","Statistic"],["thermostat","Thermostat"],["tile","Tile"],
-        ["weather-forecast","Weather Forecast"],["horizontal-stack","Horizontal Stack"],
-        ["vertical-stack","Vertical Stack"],["grid","Grid"],
-      ];
-      const customTypes = [
-        ["custom:bubble-card","Bubble Card"],["custom:mushroom-template-card","Mushroom Template"],
-        ["custom:mini-graph-card","Mini Graph Card"],["custom:apexcharts-card","ApexCharts Card"],
-        ["custom:button-card","Button Card"],
-      ];
-
-      const typeOpts = (list) => list.map(([val, label]) =>
-        `<option value="${val}" ${currentType === val ? "selected":""}>${esc(label)}</option>`
-      ).join("");
 
       this.shadowRoot.innerHTML = `
         <style>
@@ -161,11 +137,11 @@ try {
           .section { margin-bottom:16px; }
           .section-title {
             font-size:13px; font-weight:600; color:var(--secondary-text-color);
-            text-transform:uppercase; letter-spacing:.05em; margin-bottom:8px;
+            text-transform:uppercase; letter-spacing:.05em; margin-bottom:10px;
           }
           .row { display:flex; align-items:center; gap:12px; margin-bottom:10px; }
           .row label { flex:0 0 160px; font-size:14px; color:var(--primary-text-color); }
-          select, input[type="text"], input[type="number"], input[type="range"] {
+          select, input[type="number"], input[type="range"] {
             flex:1; padding:6px 8px; border-radius:6px;
             border:1px solid var(--divider-color,#e0e0e0);
             background:var(--card-background-color,#fff);
@@ -180,33 +156,44 @@ try {
           .opacity-row { display:flex; align-items:center; gap:12px; margin-bottom:10px; transition:opacity .2s; }
           .opacity-row label { flex:0 0 160px; font-size:14px; color:var(--primary-text-color); }
           .opacity-val { font-size:13px; color:var(--secondary-text-color); min-width:34px; text-align:right; }
-          .warn {
-            padding:10px 12px; background:rgba(255,152,0,.12);
-            border-left:3px solid var(--warning-color,#ff9800);
-            border-radius:4px; font-size:13px; color:var(--primary-text-color); margin-bottom:14px;
-          }
           hr { border:none; border-top:1px solid var(--divider-color,#e0e0e0); margin:16px 0; }
-        </style>
 
-        ${!cfg.card ? `<div class="warn">⚠️ Aucune carte configurée — sélectionnez un type ci-dessous.</div>` : ""}
+          /* ── Carte à protéger ── */
+          .card-wrap {
+            border:1px solid var(--divider-color,#e0e0e0);
+            border-radius:8px; overflow:hidden;
+          }
+          .card-header {
+            display:flex; align-items:center; gap:10px; padding:10px 12px;
+            background:var(--secondary-background-color,rgba(255,255,255,.04));
+            border-bottom:1px solid var(--divider-color,#e0e0e0);
+          }
+          .card-header-icon { font-size:18px; }
+          .card-header-type { flex:1; font-size:13px; font-weight:600; color:var(--primary-text-color); }
+          .card-header-btn {
+            background:none; border:none; cursor:pointer; padding:4px 8px;
+            color:var(--primary-color,#03a9f4); font-size:12px; border-radius:4px;
+          }
+          .card-header-btn:hover { background:rgba(3,169,244,.1); }
+          .card-editor-slot { padding:8px 0 0 0; }
+          .add-card-btn {
+            display:flex; align-items:center; justify-content:center; gap:8px;
+            width:100%; padding:14px; border-radius:8px; cursor:pointer;
+            border:2px dashed var(--divider-color,#ccc);
+            background:transparent; color:var(--primary-color,#03a9f4);
+            font-size:14px; font-weight:500; box-sizing:border-box;
+          }
+          .add-card-btn:hover { background:rgba(3,169,244,.07); border-color:var(--primary-color,#03a9f4); }
+          .picker-wrap {
+            border:1px solid var(--divider-color,#e0e0e0);
+            border-radius:8px; overflow:hidden; max-height:420px; overflow-y:auto;
+          }
+        </style>
 
         <!-- Carte à protéger -->
         <div class="section">
           <div class="section-title">Carte à protéger</div>
-          <div class="row">
-            <label>Type de carte</label>
-            <select id="card-type">
-              <option value="">— Choisir —</option>
-              <optgroup label="Natif HA">${typeOpts(nativeTypes)}</optgroup>
-              <optgroup label="HACS / Custom">${typeOpts(customTypes)}</optgroup>
-              <option value="_custom" ${isCustom ? "selected":""}>Autre (saisie libre)</option>
-            </select>
-          </div>
-          <div class="row" id="custom-type-row" style="${isCustom ? "" : "display:none"}">
-            <label>Type personnalisé</label>
-            <input type="text" id="custom-type-input" placeholder="custom:ma-carte" value="${esc(isCustom ? currentType : "")}">
-          </div>
-          <div class="hint">Configurez les options de la carte via "Afficher l'éditeur de code" en bas.</div>
+          <div id="card-zone"></div>
         </div>
 
         <hr>
@@ -218,10 +205,10 @@ try {
             <label>Utilisateurs autorisés</label>
             <select id="allowed-users" multiple>${userOptions}</select>
           </div>
-          <div class="hint">Ctrl+clic pour sélectionner plusieurs. Vide = tout le monde peut interagir.</div>
+          <div class="hint">Ctrl+clic pour plusieurs. Vide = tout le monde peut interagir.</div>
 
           <div class="row" style="margin-top:8px">
-            <label>Mode de restriction</label>
+            <label>Mode</label>
             <select id="mode">
               <option value="read_only" ${mode==="read_only"?"selected":""}>🔒 Lecture seule</option>
               <option value="hidden"    ${mode==="hidden"   ?"selected":""}>👁️ Cachée</option>
@@ -263,94 +250,142 @@ try {
         </div>
       `;
 
+      this._renderCardZone();
       this._attachListeners();
     }
+
+    // ── Zone carte : picker ou éditeur ────────────────────────────────────────
+
+    _renderCardZone() {
+      const zone = this.shadowRoot.getElementById("card-zone");
+      if (!zone) return;
+      zone.innerHTML = "";
+      this._cardEditor = null;
+
+      if (this._showPicker) {
+        // Affiche le hui-card-picker
+        const wrap   = document.createElement("div");
+        wrap.className = "picker-wrap";
+        const picker = document.createElement("hui-card-picker");
+        picker.hass  = this._hass;
+        picker.addEventListener("config-changed", (e) => {
+          const cardConfig = e.detail?.config;
+          if (!cardConfig) return;
+          this._showPicker = false;
+          const newConfig  = { ...this._config, card: cardConfig };
+          this._config     = newConfig;
+          this._fire(newConfig);
+          this._render();
+        });
+        wrap.appendChild(picker);
+        zone.appendChild(wrap);
+      } else if (this._config.card) {
+        // Affiche le badge + hui-card-element-editor
+        const cardType = this._config.card.type || "carte";
+        const wrap     = document.createElement("div");
+        wrap.className = "card-wrap";
+
+        // Header avec type + bouton changer
+        const header   = document.createElement("div");
+        header.className = "card-header";
+        header.innerHTML = `
+          <span class="card-header-icon">🃏</span>
+          <span class="card-header-type">${esc(cardType)}</span>
+          <button class="card-header-btn" id="change-card-btn">Changer</button>
+        `;
+        header.querySelector("#change-card-btn").addEventListener("click", () => {
+          this._showPicker = true;
+          this._renderCardZone();
+        });
+        wrap.appendChild(header);
+
+        // hui-card-element-editor
+        const editorSlot = document.createElement("div");
+        editorSlot.className = "card-editor-slot";
+        const cardEditor = document.createElement("hui-card-element-editor");
+        cardEditor.hass  = this._hass;
+        cardEditor.lovelace = this._getLovelace();
+        try { cardEditor.setConfig(this._config.card); } catch {}
+        cardEditor.addEventListener("config-changed", (e) => {
+          const cardConfig = e.detail?.config;
+          if (!cardConfig) return;
+          const newConfig  = { ...this._config, card: cardConfig };
+          this._config     = newConfig;
+          this._fire(newConfig);
+        });
+        this._cardEditor = cardEditor;
+        editorSlot.appendChild(cardEditor);
+        wrap.appendChild(editorSlot);
+        zone.appendChild(wrap);
+      } else {
+        // Bouton "Choisir une carte"
+        const btn = document.createElement("button");
+        btn.className = "add-card-btn";
+        btn.innerHTML = `<span style="font-size:20px;line-height:1">＋</span> Choisir une carte`;
+        btn.addEventListener("click", () => {
+          this._showPicker = true;
+          this._renderCardZone();
+        });
+        zone.appendChild(btn);
+      }
+    }
+
+    // Récupère l'objet lovelace du contexte HA (nécessaire pour hui-card-element-editor)
+    _getLovelace() {
+      try {
+        return document.querySelector("home-assistant")?.shadowRoot
+          ?.querySelector("ha-panel-lovelace")?.shadowRoot
+          ?.querySelector("hui-root")?.lovelace ?? null;
+      } catch { return null; }
+    }
+
+    // ── Listeners formulaire ──────────────────────────────────────────────────
 
     _attachListeners() {
       const r = this.shadowRoot;
 
-      // Type de carte
-      r.getElementById("card-type")?.addEventListener("change", (e) => {
-        const val      = e.target.value;
-        const customRow = r.getElementById("custom-type-row");
-        if (val === "_custom") {
-          customRow.style.display = "";
-        } else {
-          customRow.style.display = "none";
-          if (val) this._applyCardType(val);
-        }
-      });
-      r.getElementById("custom-type-input")?.addEventListener("change", (e) => {
-        const val = e.target.value.trim();
-        if (val) this._applyCardType(val);
-      });
-
-      // Utilisateurs autorisés
       r.getElementById("allowed-users")?.addEventListener("change", (e) => {
         const selected  = Array.from(e.target.selectedOptions).map(o => o.value);
         const newConfig = { ...this._config, allowed_users: selected };
-        this._config = newConfig;
-        this._fire(newConfig);
+        this._config = newConfig; this._fire(newConfig);
       });
 
-      // Mode
       r.getElementById("mode")?.addEventListener("change", (e) => {
-        const newMode  = e.target.value;
-        const opRow    = r.getElementById("opacity-row");
-        if (opRow) {
-          opRow.style.opacity       = newMode === "hidden" ? "0.4" : "1";
-          opRow.style.pointerEvents = newMode === "hidden" ? "none"  : "";
-        }
+        const newMode = e.target.value;
+        const opRow   = r.getElementById("opacity-row");
+        if (opRow) { opRow.style.opacity = newMode==="hidden"?"0.4":"1"; opRow.style.pointerEvents = newMode==="hidden"?"none":""; }
         const newConfig = { ...this._config, mode: newMode };
-        this._config = newConfig;
-        this._fire(newConfig);
+        this._config = newConfig; this._fire(newConfig);
       });
 
-      // Opacité
       const opInput = r.getElementById("opacity");
       const opVal   = r.getElementById("opacity-val");
       opInput?.addEventListener("input",  (e) => { if (opVal) opVal.textContent = `${Math.round(parseFloat(e.target.value)*100)}%`; });
       opInput?.addEventListener("change", (e) => {
         const newConfig = { ...this._config, overlay_opacity: parseFloat(e.target.value) };
-        this._config = newConfig;
-        this._fire(newConfig);
+        this._config = newConfig; this._fire(newConfig);
       });
 
-      // Show user
       r.getElementById("show-user")?.addEventListener("change", (e) => {
         const newConfig = { ...this._config, show_user: e.target.checked };
-        this._config = newConfig;
-        this._fire(newConfig);
+        this._config = newConfig; this._fire(newConfig);
       });
 
-      // Grid rows
       r.getElementById("grid-rows")?.addEventListener("change", (e) => {
         const val = parseInt(e.target.value);
-        const go  = { ...(this._config.grid_options || {}) };
-        if (!isNaN(val) && val > 0) go.rows = val; else delete go.rows;
+        const go  = { ...(this._config.grid_options||{}) };
+        if (!isNaN(val)&&val>0) go.rows=val; else delete go.rows;
         const newConfig = { ...this._config, grid_options: go };
-        this._config = newConfig;
-        this._fire(newConfig);
+        this._config = newConfig; this._fire(newConfig);
       });
 
-      // Grid cols
       r.getElementById("grid-cols")?.addEventListener("change", (e) => {
         const val = parseInt(e.target.value);
-        const go  = { ...(this._config.grid_options || {}) };
-        if (!isNaN(val) && val > 0) go.columns = val; else delete go.columns;
+        const go  = { ...(this._config.grid_options||{}) };
+        if (!isNaN(val)&&val>0) go.columns=val; else delete go.columns;
         const newConfig = { ...this._config, grid_options: go };
-        this._config = newConfig;
-        this._fire(newConfig);
+        this._config = newConfig; this._fire(newConfig);
       });
-    }
-
-    _applyCardType(type) {
-      // Conserver les options existantes de la carte si même type, sinon repartir à zéro
-      const existing = this._config.card || {};
-      const card     = existing.type === type ? existing : { type };
-      const newConfig = { ...this._config, card };
-      this._config = newConfig;
-      this._fire(newConfig);
     }
   }
 
@@ -383,19 +418,20 @@ try {
     static getConfigElement() { return document.createElement("restrictor-card-editor"); }
 
     static getStubConfig() {
-      return {
-        card:            { type: "entities", entities: [] },
-        allowed_users:   [],
-        mode:            "read_only",
-        overlay_opacity: 0,
-        show_user:       false,
-      };
+      return { card: null, allowed_users: [], mode: "read_only", overlay_opacity: 0, show_user: false };
     }
 
     setConfig(config) {
+      if (config?.card === undefined && !config?.card) {
+        // Config vide depuis getStubConfig — on accepte card:null le temps de la config
+        this._config = {
+          allowed_users: [], mode: "read_only", overlay_opacity: 0,
+          show_user: false, card: null,
+        };
+        return;
+      }
       if (!config?.card) throw new Error('Restrictor Card: clé "card" manquante.');
-      let mode = "read_only";
-      if (config.mode === "hidden" || config.mode === "read_only") mode = config.mode;
+      let mode = config.mode === "hidden" ? "hidden" : "read_only";
       this._config = {
         allowed_users:   Array.isArray(config.allowed_users) ? config.allowed_users : [],
         mode,
@@ -417,7 +453,7 @@ try {
       const u   = hass?.user;
       const key = u ? `${u.id}|${u.name}` : null;
       if (key !== this._userCacheKey) { this._userCache = null; this._userCacheKey = key; }
-      if (!this._built && this._config) { this._build(); return; }
+      if (!this._built && this._config?.card) { this._build(); return; }
       if (this._innerCard && this._innerCard.hass !== hass) {
         try { this._innerCard.hass = hass; } catch {}
       }
@@ -482,7 +518,7 @@ try {
         const now = this._isEditMode();
         if (now !== last) { last = now; this._scheduleReapply(); }
       });
-      this._editObserver.observe(document.body, { attributes: true, subtree: true, attributeFilter: ["class"] });
+      this._editObserver.observe(document.body, { attributes:true, subtree:true, attributeFilter:["class"] });
     }
 
     _attachDomObserver() {
@@ -490,7 +526,7 @@ try {
       if (!sr) return;
       if (this._domObserver) { try { this._domObserver.disconnect(); } catch {} }
       this._domObserver = new MutationObserver(() => this._scheduleReapply());
-      this._domObserver.observe(sr, { childList: true, subtree: true });
+      this._domObserver.observe(sr, { childList:true, subtree:true });
     }
 
     _attachVisibilityHooks() {
@@ -527,7 +563,7 @@ try {
         if (node.tagName?.toLowerCase() === "ha-card") out.add(node);
         if (node.shadowRoot) {
           node.shadowRoot.querySelectorAll("ha-card").forEach(hc => out.add(hc));
-          node.shadowRoot.querySelectorAll("*").forEach(child => crawl(child, d + 1));
+          node.shadowRoot.querySelectorAll("*").forEach(child => crawl(child, d+1));
         }
       };
       crawl(el, 0);
@@ -546,14 +582,13 @@ try {
       const overlay = document.createElement("div");
       overlay.className = "restrictor-overlay";
       Object.assign(overlay.style, {
-        position: "absolute", inset: "0", zIndex: "10",
-        cursor:        interactive ? "default"   : "not-allowed",
+        position:"absolute", inset:"0", zIndex:"10",
+        cursor:        interactive ? "default"  : "not-allowed",
         background:    `rgba(0,0,0,${opacity||0})`,
-        pointerEvents: interactive ? "none"      : "auto",
+        pointerEvents: interactive ? "none"     : "auto",
       });
       const cs = getComputedStyle(targetHaCard);
       if (!cs.position || cs.position === "static") targetHaCard.style.position = "relative";
-
       if (!interactive) {
         const stop = e => { e.stopPropagation(); e.preventDefault(); };
         ["click","mousedown","mouseup","touchstart","touchend",
@@ -570,7 +605,6 @@ try {
           overlay.appendChild(lock);
         }
       }
-
       if (showBadge) {
         const badge = document.createElement("div");
         badge.textContent = badgeText;
@@ -581,7 +615,6 @@ try {
         });
         overlay.appendChild(badge);
       }
-
       targetHaCard.appendChild(overlay);
       this._evtCleanup.push(() => { try { targetHaCard.removeChild(overlay); } catch {} });
     }
@@ -590,45 +623,36 @@ try {
       if (!this._innerCard) return;
       this._clearOverlays();
       this.style.display = "";
-
       const needUser = this._config.show_user || this._config.allowed_users.length > 0;
       let user = { id: "", name: "" };
       if (needUser) user = await this._getCurrentUser();
-
       let isAllowed = true;
       if (this._config.allowed_users.length > 0) {
         const uname = this._norm(user.name);
         isAllowed = this._config.allowed_users.some(x => this._norm(x) === uname);
       }
-
       if (this._isEditMode()) { this._lastLockState = "edit"; return; }
-
       if (isAllowed) {
         this._lastLockState = "allowed";
         if (this._config.show_user) {
           const first = this._findAllHaCards(this._innerCard)[0];
           if (first) this._addOverlayInside(first, {
-            showBadge: true, badgeText: user.name || "(inconnu)",
-            opacity: 0, showLock: false, interactive: true,
+            showBadge:true, badgeText:user.name||"(inconnu)",
+            opacity:0, showLock:false, interactive:true,
           });
         }
         return;
       }
-
       if (this._config.mode === "hidden") {
-        this._lastLockState = "hidden";
-        this.style.display  = "none";
-        return;
+        this._lastLockState = "hidden"; this.style.display = "none"; return;
       }
-
       this._lastLockState = "locked";
       this._findAllHaCards(this._innerCard).forEach((hc, idx) => {
         this._addOverlayInside(hc, {
           showBadge:   this._config.show_user && idx === 0,
           badgeText:   user.name || "(inconnu)",
           opacity:     this._config.overlay_opacity,
-          showLock:    true,
-          interactive: false,
+          showLock:    true, interactive: false,
         });
       });
     }
@@ -654,7 +678,7 @@ try {
 
 })();
 
-// Enregistrement dans le registre HA — indispensable pour que getConfigElement() soit appelé
+// Enregistrement HA — requis pour getConfigElement()
 window.customCards = window.customCards || [];
 if (!window.customCards.some(c => c.type === "restrictor-card")) {
   window.customCards.push({
