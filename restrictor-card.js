@@ -87,7 +87,7 @@ try {
     Object.assign(overlay.style, {
       position:   "fixed",
       inset:      "0",
-      zIndex:     "9999",
+      zIndex:     "99999",
       background: "rgba(0,0,0,0.6)",
       display:    "flex",
       alignItems: "center",
