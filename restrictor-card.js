@@ -1,10 +1,10 @@
-// Restrictor Card — v1.3
-// - Sélecteur de carte via hui-card-picker (grille visuelle native HA)
-// - Éditeur de carte via hui-card-element-editor (formulaire natif HA)
-// - Users chargés via WebSocket (config/auth/list)
-// - Tous les fixes v1.1 inclus
+// Restrictor Card — v1.4
+// - hui-card-picker inline avec détection automatique de l'event correct
+// - Éditeur de config carte via YAML inline (textarea styled)
+// - Users via WebSocket
+// - Tous les fixes v1.1
 
-const RESTRICTOR_VERSION = "1.3.0";
+const RESTRICTOR_VERSION = "1.4.0";
 try {
   const KEY  = "restrictor_card_version";
   const prev = localStorage.getItem(KEY);
@@ -70,6 +70,44 @@ try {
     return String(str ?? "").replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;");
   }
 
+  function configToYaml(obj, indent) {
+    // Sérialisation YAML simple (sans dépendance)
+    indent = indent || 0;
+    const pad = "  ".repeat(indent);
+    if (obj === null || obj === undefined) return "null";
+    if (typeof obj === "boolean") return obj ? "true" : "false";
+    if (typeof obj === "number") return String(obj);
+    if (typeof obj === "string") {
+      if (/[:{}\[\],&*#?|<>=!%@`]/.test(obj) || obj.includes("\n") || obj.trim() !== obj)
+        return JSON.stringify(obj);
+      return obj;
+    }
+    if (Array.isArray(obj)) {
+      if (obj.length === 0) return "[]";
+      return "\n" + obj.map(v => `${pad}- ${configToYaml(v, indent + 1)}`).join("\n");
+    }
+    if (typeof obj === "object") {
+      const keys = Object.keys(obj);
+      if (keys.length === 0) return "{}";
+      return "\n" + keys.map(k => {
+        const v = obj[k];
+        const val = configToYaml(v, indent + 1);
+        return `${pad}${k}:${val.startsWith("\n") ? val : " " + val}`;
+      }).join("\n");
+    }
+    return String(obj);
+  }
+
+  function yamlToConfig(yaml) {
+    // Parse YAML simple via js-yaml si dispo, sinon JSON fallback
+    try {
+      if (window.jsyaml) return window.jsyaml.load(yaml);
+    } catch {}
+    // Fallback: tente JSON
+    try { return JSON.parse(yaml); } catch {}
+    return null;
+  }
+
   // ═══════════════════════════════════════════════════════════════════════════
   // ÉDITEUR
   // ═══════════════════════════════════════════════════════════════════════════
@@ -78,20 +116,16 @@ try {
     constructor() {
       super();
       this.attachShadow({ mode: "open" });
-      this._config      = {};
-      this._hass        = null;
-      this._users       = [];
-      this._ready       = false;
-      this._cardEditor  = null;   // hui-card-element-editor actif
-      this._showPicker  = false;  // true = on affiche le picker inline
+      this._config     = {};
+      this._hass       = null;
+      this._users      = [];
+      this._ready      = false;
+      this._showPicker = false;
+      this._yamlError  = null;
     }
 
     set hass(hass) {
       this._hass = hass;
-      // Propager hass à l'éditeur de carte si présent
-      if (this._cardEditor) {
-        try { this._cardEditor.hass = hass; } catch {}
-      }
       if (!this._ready) this._init();
     }
 
@@ -112,7 +146,7 @@ try {
       }));
     }
 
-    // ── Render principal ──────────────────────────────────────────────────────
+    // ── Render ────────────────────────────────────────────────────────────────
 
     _render() {
       const cfg          = this._config;
@@ -123,6 +157,14 @@ try {
       const gridRows     = cfg.grid_options?.rows    ?? cfg.grid_rows    ?? "";
       const gridCols     = cfg.grid_options?.columns ?? cfg.grid_columns ?? "";
       const currentType  = cfg.card?.type || "";
+
+      const cardYaml = cfg.card
+        ? Object.keys(cfg.card).map(k => {
+            const v = cfg.card[k];
+            const val = configToYaml(v, 1);
+            return `${k}:${val.startsWith("\n") ? val : " " + val}`;
+          }).join("\n")
+        : "";
 
       const userOptions = this._users.length > 0
         ? this._users.map(u =>
@@ -153,29 +195,25 @@ try {
           .hint { font-size:11px; color:var(--secondary-text-color); margin:-4px 0 8px 172px; }
           .toggle-row { display:flex; align-items:center; justify-content:space-between; padding:6px 0; }
           .toggle-row label { font-size:14px; color:var(--primary-text-color); }
-          .opacity-row { display:flex; align-items:center; gap:12px; margin-bottom:10px; transition:opacity .2s; }
+          .opacity-row { display:flex; align-items:center; gap:12px; margin-bottom:10px; }
           .opacity-row label { flex:0 0 160px; font-size:14px; color:var(--primary-text-color); }
           .opacity-val { font-size:13px; color:var(--secondary-text-color); min-width:34px; text-align:right; }
           hr { border:none; border-top:1px solid var(--divider-color,#e0e0e0); margin:16px 0; }
 
-          /* ── Carte à protéger ── */
-          .card-wrap {
-            border:1px solid var(--divider-color,#e0e0e0);
-            border-radius:8px; overflow:hidden;
-          }
-          .card-header {
+          /* Carte zone */
+          .card-badge {
             display:flex; align-items:center; gap:10px; padding:10px 12px;
             background:var(--secondary-background-color,rgba(255,255,255,.04));
-            border-bottom:1px solid var(--divider-color,#e0e0e0);
+            border:1px solid var(--divider-color,#e0e0e0); border-radius:8px;
+            margin-bottom:8px;
           }
-          .card-header-icon { font-size:18px; }
-          .card-header-type { flex:1; font-size:13px; font-weight:600; color:var(--primary-text-color); }
-          .card-header-btn {
-            background:none; border:none; cursor:pointer; padding:4px 8px;
-            color:var(--primary-color,#03a9f4); font-size:12px; border-radius:4px;
+          .card-badge-type { flex:1; font-size:13px; font-weight:600; color:var(--primary-text-color); }
+          .change-btn {
+            background:none; border:none; cursor:pointer; padding:4px 10px;
+            color:var(--primary-color,#03a9f4); font-size:13px; border-radius:4px;
+            font-weight:500;
           }
-          .card-header-btn:hover { background:rgba(3,169,244,.1); }
-          .card-editor-slot { padding:8px 0 0 0; }
+          .change-btn:hover { background:rgba(3,169,244,.1); }
           .add-card-btn {
             display:flex; align-items:center; justify-content:center; gap:8px;
             width:100%; padding:14px; border-radius:8px; cursor:pointer;
@@ -184,10 +222,47 @@ try {
             font-size:14px; font-weight:500; box-sizing:border-box;
           }
           .add-card-btn:hover { background:rgba(3,169,244,.07); border-color:var(--primary-color,#03a9f4); }
-          .picker-wrap {
-            border:1px solid var(--divider-color,#e0e0e0);
-            border-radius:8px; overflow:hidden; max-height:420px; overflow-y:auto;
+
+          /* Picker inline */
+          .picker-container {
+            border:1px solid var(--divider-color,#e0e0e0); border-radius:8px;
+            overflow:hidden; max-height:450px; overflow-y:auto;
+            background:var(--card-background-color,#1c1c1c);
           }
+          .picker-header {
+            display:flex; align-items:center; justify-content:space-between;
+            padding:8px 12px; border-bottom:1px solid var(--divider-color,#e0e0e0);
+            font-size:13px; font-weight:600; color:var(--secondary-text-color);
+          }
+          .cancel-btn {
+            background:none; border:none; cursor:pointer; padding:4px 8px;
+            color:var(--secondary-text-color); font-size:12px; border-radius:4px;
+          }
+          .cancel-btn:hover { background:rgba(255,255,255,.08); }
+
+          /* YAML editor */
+          .yaml-section { margin-top:8px; }
+          .yaml-label {
+            font-size:11px; color:var(--secondary-text-color); margin-bottom:4px;
+            display:flex; align-items:center; justify-content:space-between;
+          }
+          .yaml-area {
+            width:100%; min-height:120px; box-sizing:border-box;
+            padding:8px 10px; border-radius:6px;
+            border:1px solid var(--divider-color,#e0e0e0);
+            background:var(--code-editor-background-color,#1e1e1e);
+            color:var(--code-editor-color,#d4d4d4);
+            font-family:monospace; font-size:12px; line-height:1.5;
+            resize:vertical;
+          }
+          .yaml-area.error { border-color:var(--error-color,#db4437); }
+          .yaml-error { font-size:11px; color:var(--error-color,#db4437); margin-top:4px; }
+          .yaml-apply-btn {
+            margin-top:6px; padding:5px 14px; border-radius:5px; cursor:pointer;
+            background:var(--primary-color,#03a9f4); color:#fff;
+            border:none; font-size:13px; font-weight:500;
+          }
+          .yaml-apply-btn:hover { opacity:.85; }
         </style>
 
         <!-- Carte à protéger -->
@@ -205,7 +280,7 @@ try {
             <label>Utilisateurs autorisés</label>
             <select id="allowed-users" multiple>${userOptions}</select>
           </div>
-          <div class="hint">Ctrl+clic pour plusieurs. Vide = tout le monde peut interagir.</div>
+          <div class="hint">Ctrl+clic pour plusieurs. Vide = tout le monde.</div>
 
           <div class="row" style="margin-top:8px">
             <label>Mode</label>
@@ -250,93 +325,105 @@ try {
         </div>
       `;
 
-      this._renderCardZone();
+      this._renderCardZone(cardYaml);
       this._attachListeners();
     }
 
-    // ── Zone carte : picker ou éditeur ────────────────────────────────────────
+    // ── Zone carte ────────────────────────────────────────────────────────────
 
-    _renderCardZone() {
+    _renderCardZone(cardYaml) {
       const zone = this.shadowRoot.getElementById("card-zone");
       if (!zone) return;
       zone.innerHTML = "";
-      this._cardEditor = null;
 
       if (this._showPicker) {
-        // Affiche le hui-card-picker
-        const wrap   = document.createElement("div");
-        wrap.className = "picker-wrap";
+        // ── Picker inline ──
+        const wrap = document.createElement("div");
+        wrap.className = "picker-container";
+
+        const header = document.createElement("div");
+        header.className = "picker-header";
+        header.innerHTML = `<span>Choisir une carte</span><button class="cancel-btn" id="picker-cancel">✕ Annuler</button>`;
+        header.querySelector("#picker-cancel").addEventListener("click", () => {
+          this._showPicker = false;
+          this._render();
+        });
+        wrap.appendChild(header);
+
         const picker = document.createElement("hui-card-picker");
-        picker.hass  = this._hass;
-        picker.addEventListener("config-changed", (e) => {
-          const cardConfig = e.detail?.config;
-          if (!cardConfig) return;
+        picker.hass     = this._hass;
+        picker.style.cssText = "display:block";
+
+        // Écoute tous les events possibles que hui-card-picker peut émettre
+        const onPick = (e) => {
+          const cardConfig = e.detail?.config || e.detail?.cardConfig || e.detail;
+          if (!cardConfig || typeof cardConfig !== "object" || !cardConfig.type) return;
           this._showPicker = false;
           const newConfig  = { ...this._config, card: cardConfig };
           this._config     = newConfig;
           this._fire(newConfig);
           this._render();
+        };
+        ["config-changed", "card-picked", "pick-card", "value-changed"].forEach(ev => {
+          picker.addEventListener(ev, onPick);
         });
+
         wrap.appendChild(picker);
         zone.appendChild(wrap);
+
       } else if (this._config.card) {
-        // Affiche le badge + hui-card-element-editor
-        const cardType = this._config.card.type || "carte";
-        const wrap     = document.createElement("div");
-        wrap.className = "card-wrap";
-
-        // Header avec type + bouton changer
-        const header   = document.createElement("div");
-        header.className = "card-header";
-        header.innerHTML = `
-          <span class="card-header-icon">🃏</span>
-          <span class="card-header-type">${esc(cardType)}</span>
-          <button class="card-header-btn" id="change-card-btn">Changer</button>
+        // ── Badge + YAML editor ──
+        const badge = document.createElement("div");
+        badge.className = "card-badge";
+        badge.innerHTML = `
+          <span style="font-size:18px">🃏</span>
+          <span class="card-badge-type">${esc(this._config.card.type || "carte")}</span>
+          <button class="change-btn" id="change-btn">Changer</button>
         `;
-        header.querySelector("#change-card-btn").addEventListener("click", () => {
+        badge.querySelector("#change-btn").addEventListener("click", () => {
           this._showPicker = true;
-          this._renderCardZone();
+          this._renderCardZone(cardYaml);
         });
-        wrap.appendChild(header);
+        zone.appendChild(badge);
 
-        // hui-card-element-editor
-        const editorSlot = document.createElement("div");
-        editorSlot.className = "card-editor-slot";
-        const cardEditor = document.createElement("hui-card-element-editor");
-        cardEditor.hass  = this._hass;
-        cardEditor.lovelace = this._getLovelace();
-        try { cardEditor.setConfig(this._config.card); } catch {}
-        cardEditor.addEventListener("config-changed", (e) => {
-          const cardConfig = e.detail?.config;
-          if (!cardConfig) return;
-          const newConfig  = { ...this._config, card: cardConfig };
-          this._config     = newConfig;
+        // YAML editor pour configurer la carte choisie
+        const yamlSection = document.createElement("div");
+        yamlSection.className = "yaml-section";
+        yamlSection.innerHTML = `
+          <div class="yaml-label">
+            <span>Configuration de la carte (YAML)</span>
+          </div>
+          <textarea class="yaml-area${this._yamlError ? " error" : ""}" id="card-yaml" spellcheck="false">${esc(cardYaml)}</textarea>
+          ${this._yamlError ? `<div class="yaml-error">⚠️ ${esc(this._yamlError)}</div>` : ""}
+          <button class="yaml-apply-btn" id="yaml-apply">Appliquer</button>
+        `;
+        yamlSection.querySelector("#yaml-apply").addEventListener("click", () => {
+          const raw = yamlSection.querySelector("#card-yaml").value;
+          const parsed = yamlToConfig(raw);
+          if (!parsed || typeof parsed !== "object" || !parsed.type) {
+            this._yamlError = "YAML invalide ou clé 'type' manquante";
+            this._renderCardZone(raw);
+            return;
+          }
+          this._yamlError = null;
+          const newConfig = { ...this._config, card: parsed };
+          this._config = newConfig;
           this._fire(newConfig);
+          this._render();
         });
-        this._cardEditor = cardEditor;
-        editorSlot.appendChild(cardEditor);
-        wrap.appendChild(editorSlot);
-        zone.appendChild(wrap);
+        zone.appendChild(yamlSection);
+
       } else {
-        // Bouton "Choisir une carte"
+        // ── Bouton ajouter ──
         const btn = document.createElement("button");
         btn.className = "add-card-btn";
         btn.innerHTML = `<span style="font-size:20px;line-height:1">＋</span> Choisir une carte`;
         btn.addEventListener("click", () => {
           this._showPicker = true;
-          this._renderCardZone();
+          this._renderCardZone("");
         });
         zone.appendChild(btn);
       }
-    }
-
-    // Récupère l'objet lovelace du contexte HA (nécessaire pour hui-card-element-editor)
-    _getLovelace() {
-      try {
-        return document.querySelector("home-assistant")?.shadowRoot
-          ?.querySelector("ha-panel-lovelace")?.shadowRoot
-          ?.querySelector("hui-root")?.lovelace ?? null;
-      } catch { return null; }
     }
 
     // ── Listeners formulaire ──────────────────────────────────────────────────
@@ -422,15 +509,13 @@ try {
     }
 
     setConfig(config) {
-      if (config?.card === undefined && !config?.card) {
-        // Config vide depuis getStubConfig — on accepte card:null le temps de la config
+      if (!config?.card) {
         this._config = {
           allowed_users: [], mode: "read_only", overlay_opacity: 0,
           show_user: false, card: null,
         };
         return;
       }
-      if (!config?.card) throw new Error('Restrictor Card: clé "card" manquante.');
       let mode = config.mode === "hidden" ? "hidden" : "read_only";
       this._config = {
         allowed_users:   Array.isArray(config.allowed_users) ? config.allowed_users : [],
@@ -491,7 +576,6 @@ try {
     }
 
     getCardSize() { return this._innerCard?.getCardSize?.() ?? 3; }
-
     _norm(s) { return String(s ?? "").trim().toLowerCase(); }
 
     async _getCurrentUser() {
@@ -544,7 +628,6 @@ try {
     }
 
     _detachVisibilityHooks() { this._visHandlers.forEach(fn => { try { fn(); } catch {} }); this._visHandlers = []; }
-
     _cancelDebounce() { if (this._debounceTimer) { clearTimeout(this._debounceTimer); this._debounceTimer = null; } }
 
     _scheduleReapply() {
