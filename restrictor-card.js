@@ -81,43 +81,38 @@ try {
   // ── Overlay picker (monté sur document.body) ─────────────────────────────
 
   function openCardPicker(hass, onPick) {
-    // Cherche le dialog HA natif (top layer) pour y monter l'overlay dedans
-    let mountTarget = document.body;
-    try {
-      // ha-more-info-dialog ou hui-dialog-edit-card contient le <dialog> natif
-      const haDialogEl = document.querySelector("hui-dialog-edit-card") || document.querySelector("ha-more-info-dialog");
-      const nativeDialog = haDialogEl?.shadowRoot?.querySelector("dialog")
-        || haDialogEl?.shadowRoot?.querySelector(".mdc-dialog__surface")
-        || haDialogEl?.shadowRoot?.querySelector(".content");
-      if (nativeDialog) mountTarget = nativeDialog;
-      else if (haDialogEl) mountTarget = haDialogEl;
-    } catch {}
-
-    const overlay = document.createElement("div");
-    overlay.id = "restrictor-picker-overlay";
-    Object.assign(overlay.style, {
-      position:       mountTarget === document.body ? "fixed" : "absolute",
-      inset:          "0",
-      zIndex:         "99999",
-      background:     "rgba(0,0,0,0.7)",
-      display:        "flex",
-      alignItems:     "center",
-      justifyContent: "center",
-    });
-
-    const dialog = document.createElement("div");
-    Object.assign(dialog.style, {
-      background:    "var(--card-background-color, #1c1c1c)",
+    // Crée un vrai <dialog> natif → entre dans le top layer comme le dialog HA
+    const nativeDialog = document.createElement("dialog");
+    Object.assign(nativeDialog.style, {
+      border:        "none",
+      padding:       "0",
       borderRadius:  "12px",
       width:         "min(720px, 95vw)",
       maxHeight:     "85vh",
       overflow:      "hidden",
+      background:    "var(--card-background-color, #1c1c1c)",
+      boxShadow:     "0 8px 32px rgba(0,0,0,0.5)",
       display:       "flex",
       flexDirection: "column",
-      boxShadow:     "0 8px 32px rgba(0,0,0,0.5)",
-      position:      "relative",
     });
+    // Backdrop via ::backdrop CSS — injecté dans <head>
+    if (!document.getElementById("restrictor-dialog-style")) {
+      const style = document.createElement("style");
+      style.id = "restrictor-dialog-style";
+      style.textContent = `
+        dialog#restrictor-card-picker-dialog::backdrop {
+          background: rgba(0,0,0,0.6);
+        }
+        dialog#restrictor-card-picker-dialog {
+          display: flex;
+          flex-direction: column;
+        }
+      `;
+      document.head.appendChild(style);
+    }
+    nativeDialog.id = "restrictor-card-picker-dialog";
 
+    // Header
     const header = document.createElement("div");
     Object.assign(header.style, {
       display:        "flex",
@@ -131,21 +126,33 @@ try {
       <span style="font-size:16px;font-weight:600;color:var(--primary-text-color)">Choisir une carte</span>
       <button id="rcp-close" style="background:none;border:none;cursor:pointer;font-size:20px;color:var(--secondary-text-color);padding:4px 8px;border-radius:4px;">✕</button>
     `;
-    dialog.appendChild(header);
+    nativeDialog.appendChild(header);
 
+    // Picker
     const body = document.createElement("div");
-    Object.assign(body.style, { flex:"1", overflow:"auto" });
+    Object.assign(body.style, { flex:"1", overflow:"auto", minHeight:"300px" });
     const picker = document.createElement("hui-card-picker");
     picker.hass     = hass;
     picker.lovelace = getLovelace();
     body.appendChild(picker);
-    dialog.appendChild(body);
-    overlay.appendChild(dialog);
-    mountTarget.appendChild(overlay);
+    nativeDialog.appendChild(body);
 
-    const close = () => { try { mountTarget.removeChild(overlay); } catch {} };
-    overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+    document.body.appendChild(nativeDialog);
+    nativeDialog.showModal();
+
+    const close = () => {
+      nativeDialog.close();
+      try { document.body.removeChild(nativeDialog); } catch {}
+    };
+
+    // Clic sur le backdrop (outside dialog)
+    nativeDialog.addEventListener("click", (e) => {
+      const rect = nativeDialog.getBoundingClientRect();
+      if (e.clientX < rect.left || e.clientX > rect.right ||
+          e.clientY < rect.top  || e.clientY > rect.bottom) close();
+    });
     header.querySelector("#rcp-close").addEventListener("click", close);
+    nativeDialog.addEventListener("cancel", close);
 
     const onPickEvent = (e) => {
       const cfg = e.detail?.config || e.detail?.cardConfig || e.detail;
