@@ -81,57 +81,56 @@ try {
   // ── Overlay picker (monté sur document.body) ─────────────────────────────
 
   function openCardPicker(hass, onPick) {
-    // Trouve le shadow root de WA-DIALOG (host du <dialog> natif HA)
-    let mountRoot = document.body;
+    // Trouve le <dialog> natif HA ouvert et injecte directement dedans
+    let haDialog = null;
     try {
-      function findAllDialogRoots(root) {
-        const found = [];
-        if (!root) return found;
-        root.querySelectorAll("*").forEach(el => {
+      function findOpenDialog(root) {
+        if (!root) return null;
+        const d = root.querySelector("dialog[open]");
+        if (d) return d;
+        for (const el of root.querySelectorAll("*")) {
           if (el.shadowRoot) {
-            const d = el.shadowRoot.querySelector("dialog");
-            if (d && d.open) found.push({ shadowRoot: el.shadowRoot, dialog: d });
-            findAllDialogRoots(el.shadowRoot).forEach(r => found.push(r));
+            const found = findOpenDialog(el.shadowRoot);
+            if (found) return found;
           }
-        });
-        return found;
+        }
+        return null;
       }
-      const results = findAllDialogRoots(document);
-      if (results.length > 0) mountRoot = results[results.length - 1].shadowRoot;
-    } catch(e) { console.warn("restrictor: mountRoot fallback", e); }
+      haDialog = findOpenDialog(document);
+    } catch(e) {}
 
-    const nativeDialog = document.createElement("dialog");
-    nativeDialog.id = "restrictor-card-picker-dialog";
-    Object.assign(nativeDialog.style, {
-      border:        "none",
-      padding:       "0",
-      borderRadius:  "12px",
-      width:         "min(720px, 95vw)",
-      maxHeight:     "85vh",
-      overflow:      "hidden",
-      background:    "var(--card-background-color, #1c1c1c)",
-      boxShadow:     "0 8px 32px rgba(0,0,0,0.5)",
-      display:       "flex",
-      flexDirection: "column",
-    });
-
-    // Backdrop style — injecté dans le shadow root cible
-    const styleEl = document.createElement("style");
-    styleEl.textContent = "#restrictor-card-picker-dialog::backdrop { background: rgba(0,0,0,0.6); }";
-    mountRoot.appendChild(styleEl);
-
-    // Header
-    const header = document.createElement("div");
-    Object.assign(header.style, {
+    // Overlay injecté DANS le <dialog> natif HA — même top layer, forcément au-dessus
+    const overlay = document.createElement("div");
+    overlay.id = "restrictor-picker-overlay";
+    Object.assign(overlay.style, {
+      position:       "fixed",
+      inset:          "0",
+      zIndex:         "2147483647",
+      background:     "rgba(0,0,0,0.7)",
       display:        "flex",
       alignItems:     "center",
-      justifyContent: "space-between",
-      padding:        "16px 20px",
-      borderBottom:   "1px solid var(--divider-color,#333)",
-      flexShrink:     "0",
+      justifyContent: "center",
+    });
+
+    const box = document.createElement("div");
+    Object.assign(box.style, {
+      background:    "var(--card-background-color,#1c1c1c)",
+      borderRadius:  "12px",
+      width:         "min(720px,95vw)",
+      maxHeight:     "85vh",
+      overflow:      "hidden",
+      display:       "flex",
+      flexDirection: "column",
+      boxShadow:     "0 8px 32px rgba(0,0,0,0.5)",
+    });
+
+    const header = document.createElement("div");
+    Object.assign(header.style, {
+      display:"flex", alignItems:"center", justifyContent:"space-between",
+      padding:"16px 20px", borderBottom:"1px solid var(--divider-color,#333)", flexShrink:"0",
     });
     header.innerHTML = `<span style="font-size:16px;font-weight:600;color:var(--primary-text-color)">Choisir une carte</span><button id="rcp-close" style="background:none;border:none;cursor:pointer;font-size:20px;color:var(--secondary-text-color);padding:4px 8px;border-radius:4px;">✕</button>`;
-    nativeDialog.appendChild(header);
+    box.appendChild(header);
 
     const body = document.createElement("div");
     Object.assign(body.style, { flex:"1", overflow:"auto", minHeight:"300px" });
@@ -139,23 +138,16 @@ try {
     picker.hass     = hass;
     picker.lovelace = getLovelace();
     body.appendChild(picker);
-    nativeDialog.appendChild(body);
+    box.appendChild(body);
+    overlay.appendChild(box);
 
-    mountRoot.appendChild(nativeDialog);
-    nativeDialog.showModal();
+    // Monte dans le <dialog> HA si trouvé, sinon fallback body
+    const mountTarget = haDialog || document.body;
+    mountTarget.appendChild(overlay);
 
-    const close = () => {
-      nativeDialog.close();
-      try { mountRoot.removeChild(nativeDialog); mountRoot.removeChild(styleEl); } catch {}
-    };
-
-    nativeDialog.addEventListener("click", (e) => {
-      const rect = nativeDialog.getBoundingClientRect();
-      if (e.clientX < rect.left || e.clientX > rect.right ||
-          e.clientY < rect.top  || e.clientY > rect.bottom) close();
-    });
+    const close = () => { try { mountTarget.removeChild(overlay); } catch {} };
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
     header.querySelector("#rcp-close").addEventListener("click", close);
-    nativeDialog.addEventListener("cancel", close);
 
     const onPickEvent = (e) => {
       const cfg = e.detail?.config || e.detail?.cardConfig || e.detail;
