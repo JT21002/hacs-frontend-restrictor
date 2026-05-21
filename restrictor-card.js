@@ -81,8 +81,27 @@ try {
   // ── Overlay picker (monté sur document.body) ─────────────────────────────
 
   function openCardPicker(hass, onPick) {
-    // Crée un vrai <dialog> natif → entre dans le top layer comme le dialog HA
+    // Trouve le shadow root de WA-DIALOG (host du <dialog> natif HA)
+    let mountRoot = document.body;
+    try {
+      function findAllDialogRoots(root) {
+        const found = [];
+        if (!root) return found;
+        root.querySelectorAll("*").forEach(el => {
+          if (el.shadowRoot) {
+            const d = el.shadowRoot.querySelector("dialog");
+            if (d && d.open) found.push({ shadowRoot: el.shadowRoot, dialog: d });
+            findAllDialogRoots(el.shadowRoot).forEach(r => found.push(r));
+          }
+        });
+        return found;
+      }
+      const results = findAllDialogRoots(document);
+      if (results.length > 0) mountRoot = results[results.length - 1].shadowRoot;
+    } catch(e) { console.warn("restrictor: mountRoot fallback", e); }
+
     const nativeDialog = document.createElement("dialog");
+    nativeDialog.id = "restrictor-card-picker-dialog";
     Object.assign(nativeDialog.style, {
       border:        "none",
       padding:       "0",
@@ -95,22 +114,11 @@ try {
       display:       "flex",
       flexDirection: "column",
     });
-    // Backdrop via ::backdrop CSS — injecté dans <head>
-    if (!document.getElementById("restrictor-dialog-style")) {
-      const style = document.createElement("style");
-      style.id = "restrictor-dialog-style";
-      style.textContent = `
-        dialog#restrictor-card-picker-dialog::backdrop {
-          background: rgba(0,0,0,0.6);
-        }
-        dialog#restrictor-card-picker-dialog {
-          display: flex;
-          flex-direction: column;
-        }
-      `;
-      document.head.appendChild(style);
-    }
-    nativeDialog.id = "restrictor-card-picker-dialog";
+
+    // Backdrop style — injecté dans le shadow root cible
+    const styleEl = document.createElement("style");
+    styleEl.textContent = "#restrictor-card-picker-dialog::backdrop { background: rgba(0,0,0,0.6); }";
+    mountRoot.appendChild(styleEl);
 
     // Header
     const header = document.createElement("div");
@@ -122,13 +130,9 @@ try {
       borderBottom:   "1px solid var(--divider-color,#333)",
       flexShrink:     "0",
     });
-    header.innerHTML = `
-      <span style="font-size:16px;font-weight:600;color:var(--primary-text-color)">Choisir une carte</span>
-      <button id="rcp-close" style="background:none;border:none;cursor:pointer;font-size:20px;color:var(--secondary-text-color);padding:4px 8px;border-radius:4px;">✕</button>
-    `;
+    header.innerHTML = `<span style="font-size:16px;font-weight:600;color:var(--primary-text-color)">Choisir une carte</span><button id="rcp-close" style="background:none;border:none;cursor:pointer;font-size:20px;color:var(--secondary-text-color);padding:4px 8px;border-radius:4px;">✕</button>`;
     nativeDialog.appendChild(header);
 
-    // Picker
     const body = document.createElement("div");
     Object.assign(body.style, { flex:"1", overflow:"auto", minHeight:"300px" });
     const picker = document.createElement("hui-card-picker");
@@ -137,15 +141,14 @@ try {
     body.appendChild(picker);
     nativeDialog.appendChild(body);
 
-    document.body.appendChild(nativeDialog);
+    mountRoot.appendChild(nativeDialog);
     nativeDialog.showModal();
 
     const close = () => {
       nativeDialog.close();
-      try { document.body.removeChild(nativeDialog); } catch {}
+      try { mountRoot.removeChild(nativeDialog); mountRoot.removeChild(styleEl); } catch {}
     };
 
-    // Clic sur le backdrop (outside dialog)
     nativeDialog.addEventListener("click", (e) => {
       const rect = nativeDialog.getBoundingClientRect();
       if (e.clientX < rect.left || e.clientX > rect.right ||
