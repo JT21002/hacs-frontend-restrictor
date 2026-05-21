@@ -81,33 +81,43 @@ try {
   // ── Overlay picker (monté sur document.body) ─────────────────────────────
 
   function openCardPicker(hass, onPick) {
-    // Overlay de fond
+    // Cherche le dialog HA natif (top layer) pour y monter l'overlay dedans
+    let mountTarget = document.body;
+    try {
+      // ha-more-info-dialog ou hui-dialog-edit-card contient le <dialog> natif
+      const haDialogEl = document.querySelector("hui-dialog-edit-card") || document.querySelector("ha-more-info-dialog");
+      const nativeDialog = haDialogEl?.shadowRoot?.querySelector("dialog")
+        || haDialogEl?.shadowRoot?.querySelector(".mdc-dialog__surface")
+        || haDialogEl?.shadowRoot?.querySelector(".content");
+      if (nativeDialog) mountTarget = nativeDialog;
+      else if (haDialogEl) mountTarget = haDialogEl;
+    } catch {}
+
     const overlay = document.createElement("div");
     overlay.id = "restrictor-picker-overlay";
     Object.assign(overlay.style, {
-      position:   "fixed",
-      inset:      "0",
-      zIndex:     "99999",
-      background: "rgba(0,0,0,0.6)",
-      display:    "flex",
-      alignItems: "center",
+      position:       mountTarget === document.body ? "fixed" : "absolute",
+      inset:          "0",
+      zIndex:         "99999",
+      background:     "rgba(0,0,0,0.7)",
+      display:        "flex",
+      alignItems:     "center",
       justifyContent: "center",
     });
 
-    // Dialog container
     const dialog = document.createElement("div");
     Object.assign(dialog.style, {
-      background:   "var(--card-background-color, #1c1c1c)",
-      borderRadius: "12px",
-      width:        "min(720px, 95vw)",
-      maxHeight:    "85vh",
-      overflow:     "hidden",
-      display:      "flex",
-      flexDirection:"column",
-      boxShadow:    "0 8px 32px rgba(0,0,0,0.5)",
+      background:    "var(--card-background-color, #1c1c1c)",
+      borderRadius:  "12px",
+      width:         "min(720px, 95vw)",
+      maxHeight:     "85vh",
+      overflow:      "hidden",
+      display:       "flex",
+      flexDirection: "column",
+      boxShadow:     "0 8px 32px rgba(0,0,0,0.5)",
+      position:      "relative",
     });
 
-    // Header
     const header = document.createElement("div");
     Object.assign(header.style, {
       display:        "flex",
@@ -123,44 +133,29 @@ try {
     `;
     dialog.appendChild(header);
 
-    // Picker scroll container
     const body = document.createElement("div");
-    Object.assign(body.style, { flex:"1", overflow:"auto", padding:"0" });
-
+    Object.assign(body.style, { flex:"1", overflow:"auto" });
     const picker = document.createElement("hui-card-picker");
     picker.hass     = hass;
     picker.lovelace = getLovelace();
     body.appendChild(picker);
     dialog.appendChild(body);
     overlay.appendChild(dialog);
-    document.body.appendChild(overlay);
+    mountTarget.appendChild(overlay);
 
-    const close = () => {
-      try { document.body.removeChild(overlay); } catch {}
-    };
-
-    // Fermer sur clic overlay
-    overlay.addEventListener("click", (e) => {
-      if (e.target === overlay) close();
-    });
+    const close = () => { try { mountTarget.removeChild(overlay); } catch {} };
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
     header.querySelector("#rcp-close").addEventListener("click", close);
 
-    // Écouter tous les events possibles du picker
     const onPickEvent = (e) => {
       const cfg = e.detail?.config || e.detail?.cardConfig || e.detail;
       if (!cfg || typeof cfg !== "object" || !cfg.type) return;
       close();
       onPick(cfg);
     };
-    ["config-changed", "card-picked", "pick-card", "value-changed"].forEach(ev => {
+    ["config-changed","card-picked","pick-card","value-changed"].forEach(ev => {
       picker.addEventListener(ev, onPickEvent);
     });
-
-    // Aussi écouter les clics qui remontent depuis le picker (certaines versions HA)
-    picker.addEventListener("click", (e) => {
-      // Petit délai pour laisser le picker dispatcher son event
-      setTimeout(() => {}, 50);
-    }, true);
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
