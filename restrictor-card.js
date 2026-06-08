@@ -1,10 +1,9 @@
-// Restrictor Card — v1.5
-// - hui-card-picker monté sur document.body (overlay) pour éviter l'isolation shadowRoot
-// - Suppression de l'éditeur YAML inline
+// Restrictor Card — v1.5.1
+// - Picker injecté directement dans le <dialog> natif HA (top layer)
 // - Users via WebSocket
 // - Tous les fixes v1.1
 
-const RESTRICTOR_VERSION = "1.5.0";
+const RESTRICTOR_VERSION = "1.5.1";
 try {
   const KEY  = "restrictor_card_version";
   const prev = localStorage.getItem(KEY);
@@ -18,8 +17,6 @@ try {
 } catch {}
 
 (function () {
-
-  // ── Helpers partagés ────────────────────────────────────────────────────────
 
   async function getCurrentUser(hass) {
     try {
@@ -78,28 +75,25 @@ try {
     } catch { return null; }
   }
 
-  // ── Overlay picker (monté sur document.body) ─────────────────────────────
+  // Trouve le <dialog open> natif dans tout le DOM (y compris shadow roots)
+  function findOpenDialog(root) {
+    if (!root) return null;
+    const d = root.querySelector("dialog[open]");
+    if (d) return d;
+    for (const el of root.querySelectorAll("*")) {
+      if (el.shadowRoot) {
+        const found = findOpenDialog(el.shadowRoot);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
 
   function openCardPicker(hass, onPick) {
-    // Trouve le <dialog> natif HA ouvert et injecte directement dedans
-    let haDialog = null;
-    try {
-      function findOpenDialog(root) {
-        if (!root) return null;
-        const d = root.querySelector("dialog[open]");
-        if (d) return d;
-        for (const el of root.querySelectorAll("*")) {
-          if (el.shadowRoot) {
-            const found = findOpenDialog(el.shadowRoot);
-            if (found) return found;
-          }
-        }
-        return null;
-      }
-      haDialog = findOpenDialog(document);
-    } catch(e) {}
+    // Injecte l'overlay dans le <dialog> natif HA — même top layer, forcément au-dessus
+    const haDialog = findOpenDialog(document);
+    const mountTarget = haDialog || document.body;
 
-    // Overlay injecté DANS le <dialog> natif HA — même top layer, forcément au-dessus
     const overlay = document.createElement("div");
     overlay.id = "restrictor-picker-overlay";
     Object.assign(overlay.style, {
@@ -129,7 +123,10 @@ try {
       display:"flex", alignItems:"center", justifyContent:"space-between",
       padding:"16px 20px", borderBottom:"1px solid var(--divider-color,#333)", flexShrink:"0",
     });
-    header.innerHTML = `<span style="font-size:16px;font-weight:600;color:var(--primary-text-color)">Choisir une carte</span><button id="rcp-close" style="background:none;border:none;cursor:pointer;font-size:20px;color:var(--secondary-text-color);padding:4px 8px;border-radius:4px;">✕</button>`;
+    header.innerHTML = `
+      <span style="font-size:16px;font-weight:600;color:var(--primary-text-color)">Choisir une carte</span>
+      <button id="rcp-close" style="background:none;border:none;cursor:pointer;font-size:20px;color:var(--secondary-text-color);padding:4px 8px;border-radius:4px;">✕</button>
+    `;
     box.appendChild(header);
 
     const body = document.createElement("div");
@@ -140,9 +137,6 @@ try {
     body.appendChild(picker);
     box.appendChild(body);
     overlay.appendChild(box);
-
-    // Monte dans le <dialog> HA si trouvé, sinon fallback body
-    const mountTarget = haDialog || document.body;
     mountTarget.appendChild(overlay);
 
     const close = () => { try { mountTarget.removeChild(overlay); } catch {} };
@@ -239,7 +233,6 @@ try {
           .opacity-row label { flex:0 0 160px; font-size:14px; color:var(--primary-text-color); }
           .opacity-val { font-size:13px; color:var(--secondary-text-color); min-width:34px; text-align:right; }
           hr { border:none; border-top:1px solid var(--divider-color,#e0e0e0); margin:16px 0; }
-
           .card-badge {
             display:flex; align-items:center; gap:10px; padding:10px 14px;
             background:var(--secondary-background-color,rgba(255,255,255,.04));
@@ -248,8 +241,7 @@ try {
           .card-badge-type { flex:1; font-size:13px; font-weight:600; color:var(--primary-text-color); }
           .change-btn {
             background:none; border:none; cursor:pointer; padding:4px 10px;
-            color:var(--primary-color,#03a9f4); font-size:13px;
-            border-radius:4px; font-weight:500;
+            color:var(--primary-color,#03a9f4); font-size:13px; border-radius:4px; font-weight:500;
           }
           .change-btn:hover { background:rgba(3,169,244,.1); }
           .add-card-btn {
@@ -262,7 +254,6 @@ try {
           .add-card-btn:hover { background:rgba(3,169,244,.07); border-color:var(--primary-color,#03a9f4); }
         </style>
 
-        <!-- Carte à protéger -->
         <div class="section">
           <div class="section-title">Carte à protéger</div>
           <div id="card-zone">
@@ -281,7 +272,6 @@ try {
 
         <hr>
 
-        <!-- Contrôle d'accès -->
         <div class="section">
           <div class="section-title">Contrôle d'accès</div>
           <div class="row">
@@ -289,7 +279,6 @@ try {
             <select id="allowed-users" multiple>${userOptions}</select>
           </div>
           <div class="hint">Ctrl+clic pour plusieurs. Vide = tout le monde.</div>
-
           <div class="row" style="margin-top:8px">
             <label>Mode</label>
             <select id="mode">
@@ -297,7 +286,6 @@ try {
               <option value="hidden"    ${mode==="hidden"   ?"selected":""}>👁️ Cachée</option>
             </select>
           </div>
-
           <div class="opacity-row" id="opacity-row" style="${mode==="hidden"?"opacity:.4;pointer-events:none":""}">
             <label>Opacité du verrou</label>
             <input type="range" id="opacity" min="0" max="0.6" step="0.05" value="${opacity}">
@@ -307,7 +295,6 @@ try {
 
         <hr>
 
-        <!-- Affichage -->
         <div class="section">
           <div class="section-title">Affichage</div>
           <div class="toggle-row">
@@ -318,7 +305,6 @@ try {
 
         <hr>
 
-        <!-- Mise en page -->
         <div class="section">
           <div class="section-title">Mise en page (vue Sections)</div>
           <div class="row">
@@ -347,7 +333,6 @@ try {
 
     _attachListeners() {
       const r = this.shadowRoot;
-
       r.getElementById("add-card-btn")?.addEventListener("click", () => this._openPicker());
       r.getElementById("change-btn")?.addEventListener("click",   () => this._openPicker());
 
@@ -678,7 +663,6 @@ try {
 
 })();
 
-// Enregistrement HA — requis pour getConfigElement()
 window.customCards = window.customCards || [];
 if (!window.customCards.some(c => c.type === "restrictor-card")) {
   window.customCards.push({
