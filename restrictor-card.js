@@ -3,7 +3,7 @@
 // - Users via WebSocket
 // - Tous les fixes v1.1
 
-const RESTRICTOR_VERSION = "1.5.1";
+const RESTRICTOR_VERSION = "1.5.2";
 try {
   const KEY  = "restrictor_card_version";
   const prev = localStorage.getItem(KEY);
@@ -69,9 +69,25 @@ try {
 
   function getLovelace() {
     try {
-      return document.querySelector("home-assistant")?.shadowRoot
-        ?.querySelector("ha-panel-lovelace")?.shadowRoot
-        ?.querySelector("hui-root")?.lovelace ?? null;
+      // v2026+: lovelace directement sur ha-panel-lovelace
+      const panel = document.querySelector("home-assistant")?.shadowRoot
+        ?.querySelector("home-assistant-main")?.shadowRoot
+        ?.querySelector("ha-panel-lovelace")
+        || document.querySelector("home-assistant")?.shadowRoot
+        ?.querySelector("ha-panel-lovelace");
+      if (panel?.lovelace) return panel.lovelace;
+      if (panel?.shadowRoot?.querySelector("hui-root")?.lovelace)
+        return panel.shadowRoot.querySelector("hui-root").lovelace;
+      // Fallback dynamique
+      function findLv(root, d) {
+        if (!root || d > 5) return null;
+        for (const el of root.querySelectorAll("*")) {
+          if (el.lovelace) return el.lovelace;
+          if (el.shadowRoot) { const f = findLv(el.shadowRoot, d+1); if (f) return f; }
+        }
+        return null;
+      }
+      return findLv(document, 0);
     } catch { return null; }
   }
 
