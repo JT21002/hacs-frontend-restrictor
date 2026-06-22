@@ -1,9 +1,9 @@
-// Restrictor Card — v1.5.1
-// - Picker injecté directement dans le <dialog> natif HA (top layer)
-// - Users via WebSocket
-// - Tous les fixes v1.1
+// Restrictor Card — v1.3.0
+// - Éditeur graphique natif HA ultra-intégré (Plus besoin de passer par le YAML pour la sous-carte)
+// - Users chargés via WebSocket hass.connection
+// - Support du sélecteur visuel d'éléments enfants officiel de Home Assistant
 
-const RESTRICTOR_VERSION = "1.5.2";
+const RESTRICTOR_VERSION = "1.3.0";
 try {
   const KEY  = "restrictor_card_version";
   const prev = localStorage.getItem(KEY);
@@ -17,6 +17,8 @@ try {
 } catch {}
 
 (function () {
+
+  // ── Helpers partagés ────────────────────────────────────────────────────────
 
   async function getCurrentUser(hass) {
     try {
@@ -35,7 +37,8 @@ try {
       return list.filter(u =>
         u.is_active !== false &&
         u.system_generated !== true &&
-        Array.isArray(u.credentials) && u.credentials.length > 0
+        Array.isArray(u.credentials) &&
+        u.credentials.length > 0
       );
     } catch { return []; }
   }
@@ -67,111 +70,8 @@ try {
     return String(str ?? "").replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;");
   }
 
-  function getLovelace() {
-    try {
-      // v2026+: lovelace directement sur ha-panel-lovelace
-      const panel = document.querySelector("home-assistant")?.shadowRoot
-        ?.querySelector("home-assistant-main")?.shadowRoot
-        ?.querySelector("ha-panel-lovelace")
-        || document.querySelector("home-assistant")?.shadowRoot
-        ?.querySelector("ha-panel-lovelace");
-      if (panel?.lovelace) return panel.lovelace;
-      if (panel?.shadowRoot?.querySelector("hui-root")?.lovelace)
-        return panel.shadowRoot.querySelector("hui-root").lovelace;
-      // Fallback dynamique
-      function findLv(root, d) {
-        if (!root || d > 5) return null;
-        for (const el of root.querySelectorAll("*")) {
-          if (el.lovelace) return el.lovelace;
-          if (el.shadowRoot) { const f = findLv(el.shadowRoot, d+1); if (f) return f; }
-        }
-        return null;
-      }
-      return findLv(document, 0);
-    } catch { return null; }
-  }
-
-  // Trouve le <dialog open> natif dans tout le DOM (y compris shadow roots)
-  function findOpenDialog(root) {
-    if (!root) return null;
-    const d = root.querySelector("dialog[open]");
-    if (d) return d;
-    for (const el of root.querySelectorAll("*")) {
-      if (el.shadowRoot) {
-        const found = findOpenDialog(el.shadowRoot);
-        if (found) return found;
-      }
-    }
-    return null;
-  }
-
-  function openCardPicker(hass, onPick) {
-    // Injecte l'overlay dans le <dialog> natif HA — même top layer, forcément au-dessus
-    const haDialog = findOpenDialog(document);
-    const mountTarget = haDialog || document.body;
-
-    const overlay = document.createElement("div");
-    overlay.id = "restrictor-picker-overlay";
-    Object.assign(overlay.style, {
-      position:       "fixed",
-      inset:          "0",
-      zIndex:         "2147483647",
-      background:     "rgba(0,0,0,0.7)",
-      display:        "flex",
-      alignItems:     "center",
-      justifyContent: "center",
-    });
-
-    const box = document.createElement("div");
-    Object.assign(box.style, {
-      background:    "var(--card-background-color,#1c1c1c)",
-      borderRadius:  "12px",
-      width:         "min(720px,95vw)",
-      maxHeight:     "85vh",
-      overflow:      "hidden",
-      display:       "flex",
-      flexDirection: "column",
-      boxShadow:     "0 8px 32px rgba(0,0,0,0.5)",
-    });
-
-    const header = document.createElement("div");
-    Object.assign(header.style, {
-      display:"flex", alignItems:"center", justifyContent:"space-between",
-      padding:"16px 20px", borderBottom:"1px solid var(--divider-color,#333)", flexShrink:"0",
-    });
-    header.innerHTML = `
-      <span style="font-size:16px;font-weight:600;color:var(--primary-text-color)">Choisir une carte</span>
-      <button id="rcp-close" style="background:none;border:none;cursor:pointer;font-size:20px;color:var(--secondary-text-color);padding:4px 8px;border-radius:4px;">✕</button>
-    `;
-    box.appendChild(header);
-
-    const body = document.createElement("div");
-    Object.assign(body.style, { flex:"1", overflow:"auto", minHeight:"300px" });
-    const picker = document.createElement("hui-card-picker");
-    picker.hass     = hass;
-    picker.lovelace = getLovelace();
-    body.appendChild(picker);
-    box.appendChild(body);
-    overlay.appendChild(box);
-    mountTarget.appendChild(overlay);
-
-    const close = () => { try { mountTarget.removeChild(overlay); } catch {} };
-    overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
-    header.querySelector("#rcp-close").addEventListener("click", close);
-
-    const onPickEvent = (e) => {
-      const cfg = e.detail?.config || e.detail?.cardConfig || e.detail;
-      if (!cfg || typeof cfg !== "object" || !cfg.type) return;
-      close();
-      onPick(cfg);
-    };
-    ["config-changed","card-picked","pick-card","value-changed"].forEach(ev => {
-      picker.addEventListener(ev, onPickEvent);
-    });
-  }
-
   // ═══════════════════════════════════════════════════════════════════════════
-  // ÉDITEUR
+  // ÉDITEUR GRAPHIQUE AVANCÉ (UI NATIVE)
   // ═══════════════════════════════════════════════════════════════════════════
 
   class RestrictorCardEditor extends HTMLElement {
@@ -182,44 +82,33 @@ try {
       this._hass   = null;
       this._users  = [];
       this._ready  = false;
+      this._subCardEditor = null;
     }
 
     set hass(hass) {
       this._hass = hass;
+      if (this._subCardEditor) {
+        this._subCardEditor.hass = hass;
+      }
       if (!this._ready) this._init();
     }
 
     setConfig(config) {
       this._config = { ...config };
-      if (this._ready) this._render();
+      if (this._ready) {
+        this._updateFields();
+        this._renderSubCardEditor();
+      }
     }
 
     async _init() {
       this._ready = true;
       this._users = await fetchAllUsers(this._hass);
-      this._render();
-    }
-
-    _fire(newConfig) {
-      this.dispatchEvent(new CustomEvent("config-changed", {
-        detail: { config: newConfig }, bubbles: true, composed: true,
-      }));
-    }
-
-    _render() {
-      const cfg          = this._config;
-      const allowedUsers = Array.isArray(cfg.allowed_users) ? cfg.allowed_users : [];
-      const mode         = cfg.mode || "read_only";
-      const opacity      = typeof cfg.overlay_opacity === "number" ? cfg.overlay_opacity : 0;
-      const showUser     = !!cfg.show_user;
-      const gridRows     = cfg.grid_options?.rows    ?? cfg.grid_rows    ?? "";
-      const gridCols     = cfg.grid_options?.columns ?? cfg.grid_columns ?? "";
-      const currentType  = cfg.card?.type || "";
-
+      
+      // Initialisation de la structure globale du DOM de l'éditeur
       const userOptions = this._users.length > 0
         ? this._users.map(u =>
-            `<option value="${esc(u.name)}" ${allowedUsers.includes(u.name) ? "selected":""}>` +
-            `${esc(u.name)}${u.is_owner ? " 👑" : u.is_admin ? " (admin)":""}</option>`
+            `<option value="${esc(u.name)}">${esc(u.name)}${u.is_owner ? " 👑" : u.is_admin ? " (admin)" : ""}</option>`
           ).join("")
         : `<option disabled>Aucun utilisateur trouvé</option>`;
 
@@ -229,11 +118,11 @@ try {
           .section { margin-bottom:16px; }
           .section-title {
             font-size:13px; font-weight:600; color:var(--secondary-text-color);
-            text-transform:uppercase; letter-spacing:.05em; margin-bottom:10px;
+            text-transform:uppercase; letter-spacing:.05em; margin-bottom:8px;
           }
           .row { display:flex; align-items:center; gap:12px; margin-bottom:10px; }
           .row label { flex:0 0 160px; font-size:14px; color:var(--primary-text-color); }
-          select, input[type="number"], input[type="range"] {
+          select, input[type="text"], input[type="number"], input[type="range"] {
             flex:1; padding:6px 8px; border-radius:6px;
             border:1px solid var(--divider-color,#e0e0e0);
             background:var(--card-background-color,#fff);
@@ -245,155 +134,208 @@ try {
           .hint { font-size:11px; color:var(--secondary-text-color); margin:-4px 0 8px 172px; }
           .toggle-row { display:flex; align-items:center; justify-content:space-between; padding:6px 0; }
           .toggle-row label { font-size:14px; color:var(--primary-text-color); }
-          .opacity-row { display:flex; align-items:center; gap:12px; margin-bottom:10px; }
+          .opacity-row { display:flex; align-items:center; gap:12px; margin-bottom:10px; transition:opacity .2s; }
           .opacity-row label { flex:0 0 160px; font-size:14px; color:var(--primary-text-color); }
           .opacity-val { font-size:13px; color:var(--secondary-text-color); min-width:34px; text-align:right; }
           hr { border:none; border-top:1px solid var(--divider-color,#e0e0e0); margin:16px 0; }
-          .card-badge {
-            display:flex; align-items:center; gap:10px; padding:10px 14px;
-            background:var(--secondary-background-color,rgba(255,255,255,.04));
-            border:1px solid var(--divider-color,#e0e0e0); border-radius:8px;
+          .sub-editor-container {
+            border: 1px dashed var(--divider-color, #e0e0e0);
+            border-radius: 8px;
+            padding: 12px;
+            background: var(--card-background-color, #fafafa);
           }
-          .card-badge-type { flex:1; font-size:13px; font-weight:600; color:var(--primary-text-color); }
-          .change-btn {
-            background:none; border:none; cursor:pointer; padding:4px 10px;
-            color:var(--primary-color,#03a9f4); font-size:13px; border-radius:4px; font-weight:500;
-          }
-          .change-btn:hover { background:rgba(3,169,244,.1); }
-          .add-card-btn {
-            display:flex; align-items:center; justify-content:center; gap:8px;
-            width:100%; padding:14px; border-radius:8px; cursor:pointer;
-            border:2px dashed var(--divider-color,#ccc);
-            background:transparent; color:var(--primary-color,#03a9f4);
-            font-size:14px; font-weight:500; box-sizing:border-box;
-          }
-          .add-card-btn:hover { background:rgba(3,169,244,.07); border-color:var(--primary-color,#03a9f4); }
         </style>
 
+        <!-- Contrôle d'accès -->
         <div class="section">
-          <div class="section-title">Carte à protéger</div>
-          <div id="card-zone">
-            ${currentType
-              ? `<div class="card-badge">
-                   <span style="font-size:18px">🃏</span>
-                   <span class="card-badge-type">${esc(currentType)}</span>
-                   <button class="change-btn" id="change-btn">Changer</button>
-                 </div>`
-              : `<button class="add-card-btn" id="add-card-btn">
-                   <span style="font-size:20px;line-height:1">＋</span> Choisir une carte
-                 </button>`
-            }
-          </div>
-        </div>
-
-        <hr>
-
-        <div class="section">
-          <div class="section-title">Contrôle d'accès</div>
+          <div class="section-title">Contrôle d'accès (Restrictor)</div>
           <div class="row">
             <label>Utilisateurs autorisés</label>
             <select id="allowed-users" multiple>${userOptions}</select>
           </div>
-          <div class="hint">Ctrl+clic pour plusieurs. Vide = tout le monde.</div>
+          <div class="hint">Ctrl+clic (ou glisser sur mobile) pour en choisir plusieurs. Vide = Libre accès.</div>
+
           <div class="row" style="margin-top:8px">
-            <label>Mode</label>
+            <label>Mode de restriction</label>
             <select id="mode">
-              <option value="read_only" ${mode==="read_only"?"selected":""}>🔒 Lecture seule</option>
-              <option value="hidden"    ${mode==="hidden"   ?"selected":""}>👁️ Cachée</option>
+              <option value="read_only">🔒 Lecture seule</option>
+              <option value="hidden">👁️ Cachée</option>
             </select>
           </div>
-          <div class="opacity-row" id="opacity-row" style="${mode==="hidden"?"opacity:.4;pointer-events:none":""}">
+
+          <div class="opacity-row" id="opacity-row">
             <label>Opacité du verrou</label>
-            <input type="range" id="opacity" min="0" max="0.6" step="0.05" value="${opacity}">
-            <span class="opacity-val" id="opacity-val">${Math.round(opacity*100)}%</span>
+            <input type="range" id="opacity" min="0" max="0.6" step="0.05" value="0">
+            <span class="opacity-val" id="opacity-val">0%</span>
           </div>
+        </div>
+
+        <div class="toggle-row">
+          <label>Afficher le nom de l'utilisateur connecté</label>
+          <ha-switch id="show-user"></ha-switch>
         </div>
 
         <hr>
 
+        <!-- Configuration visuelle de la carte interne -->
         <div class="section">
-          <div class="section-title">Affichage</div>
-          <div class="toggle-row">
-            <label>Afficher le nom de l'utilisateur connecté</label>
-            <ha-switch id="show-user" ${showUser?"checked":""}></ha-switch>
+          <div class="section-title">Design de la carte à protéger</div>
+          <div id="sub-card-editor-root" class="sub-editor-container">
+            <!-- L'éditeur natif de carte Home Assistant sera injecté ici -->
           </div>
         </div>
 
         <hr>
 
+        <!-- Mise en page -->
         <div class="section">
           <div class="section-title">Mise en page (vue Sections)</div>
           <div class="row">
             <label>Lignes</label>
-            <input type="number" id="grid-rows" min="1" max="12" value="${gridRows}" placeholder="auto">
+            <input type="number" id="grid-rows" min="1" max="12" placeholder="auto">
           </div>
           <div class="row">
             <label>Colonnes</label>
-            <input type="number" id="grid-cols" min="1" max="12" value="${gridCols}" placeholder="auto">
+            <input type="number" id="grid-cols" min="1" max="12" placeholder="auto">
           </div>
-          <div class="hint">Laisser vide = taille automatique.</div>
         </div>
       `;
 
       this._attachListeners();
+      this._updateFields();
+      this._renderSubCardEditor();
     }
 
-    _openPicker() {
-      openCardPicker(this._hass, (cardConfig) => {
-        const newConfig = { ...this._config, card: cardConfig };
-        this._config    = newConfig;
-        this._fire(newConfig);
-        this._render();
-      });
+    _updateFields() {
+      const r = this.shadowRoot;
+      if (!r) return;
+
+      const cfg = this._config;
+
+      // Update multi-select users
+      const allowedUsers = Array.isArray(cfg.allowed_users) ? cfg.allowed_users : [];
+      const selectUsers = r.getElementById("allowed-users");
+      if (selectUsers) {
+        Array.from(selectUsers.options).forEach(opt => {
+          opt.selected = allowedUsers.includes(opt.value);
+        });
+      }
+
+      // Update mode
+      const mode = cfg.mode || "read_only";
+      const selectMode = r.getElementById("mode");
+      if (selectMode) selectMode.value = mode;
+
+      // Update opacity
+      const opacity = typeof cfg.overlay_opacity === "number" ? cfg.overlay_opacity : 0;
+      const inputOp = r.getElementById("opacity");
+      const valOp = r.getElementById("opacity-val");
+      if (inputOp) inputOp.value = opacity;
+      if (valOp) valOp.textContent = `${Math.round(opacity * 100)}%`;
+
+      const opRow = r.getElementById("opacity-row");
+      if (opRow) {
+        opRow.style.opacity = mode === "hidden" ? "0.4" : "1";
+        opRow.style.pointerEvents = mode === "hidden" ? "none" : "";
+      }
+
+      // Update show user switch
+      const swShowUser = r.getElementById("show-user");
+      if (swShowUser) swShowUser.checked = !!cfg.show_user;
+
+      // Update grid
+      const gridRows = cfg.grid_options?.rows ?? cfg.grid_rows ?? "";
+      const gridCols = cfg.grid_options?.columns ?? cfg.grid_columns ?? "";
+      const inputRows = r.getElementById("grid-rows");
+      const inputCols = r.getElementById("grid-cols");
+      if (inputRows) inputRows.value = gridRows;
+      if (inputCols) inputCols.value = gridCols;
+    }
+
+    async _renderSubCardEditor() {
+      const root = this.shadowRoot.getElementById("sub-card-editor-root");
+      if (!root) return;
+
+      // Si l'éditeur existe déjà, on met juste sa configuration à jour
+      if (this._subCardEditor) {
+        this._subCardEditor.config = this._config.card || { type: "entities" };
+        return;
+      }
+
+      // Sinon, on instancie le sélecteur d'éléments de carte officiel de HA
+      try {
+        // Force le chargement des composants d'édition de cartes de HA
+        if (!customElements.get("hui-card-element-editor")) {
+          const helpers = window.loadCardHelpers ? await window.loadCardHelpers() : null;
+        }
+
+        const editor = document.createElement("hui-card-element-editor");
+        editor.hass = this._hass;
+        editor.config = this._config.card || { type: "entities" };
+
+        // On écoute les modifications faites graphiquement sur la sous-carte
+        editor.addEventListener("config-changed", (ev) => {
+          ev.stopPropagation();
+          const newCardConfig = ev.detail.config;
+          const newConfig = { ...this._config, card: newCardConfig };
+          this._config = newConfig;
+          this._fire(newConfig);
+        });
+
+        root.innerHTML = "";
+        root.appendChild(editor);
+        this._subCardEditor = editor;
+      } catch (err) {
+        root.innerHTML = `<div style="color:red">Erreur d'initialisation de l'UI HA : ${err.message}</div>`;
+      }
     }
 
     _attachListeners() {
       const r = this.shadowRoot;
-      r.getElementById("add-card-btn")?.addEventListener("click", () => this._openPicker());
-      r.getElementById("change-btn")?.addEventListener("click",   () => this._openPicker());
 
       r.getElementById("allowed-users")?.addEventListener("change", (e) => {
-        const selected  = Array.from(e.target.selectedOptions).map(o => o.value);
-        const newConfig = { ...this._config, allowed_users: selected };
-        this._config = newConfig; this._fire(newConfig);
+        const selected = Array.from(e.target.selectedOptions).map(o => o.value);
+        this._fire({ ...this._config, allowed_users: selected });
       });
 
       r.getElementById("mode")?.addEventListener("change", (e) => {
-        const newMode = e.target.value;
-        const opRow   = r.getElementById("opacity-row");
-        if (opRow) { opRow.style.opacity = newMode==="hidden"?"0.4":"1"; opRow.style.pointerEvents = newMode==="hidden"?"none":""; }
-        const newConfig = { ...this._config, mode: newMode };
-        this._config = newConfig; this._fire(newConfig);
+        this._fire({ ...this._config, mode: e.target.value });
       });
 
-      const opInput = r.getElementById("opacity");
-      const opVal   = r.getElementById("opacity-val");
-      opInput?.addEventListener("input",  (e) => { if (opVal) opVal.textContent = `${Math.round(parseFloat(e.target.value)*100)}%`; });
-      opInput?.addEventListener("change", (e) => {
-        const newConfig = { ...this._config, overlay_opacity: parseFloat(e.target.value) };
-        this._config = newConfig; this._fire(newConfig);
+      r.getElementById("opacity")?.addEventListener("input", (e) => {
+        const val = parseFloat(e.target.value);
+        const valOp = r.getElementById("opacity-val");
+        if (valOp) valOp.textContent = `${Math.round(val * 100)}%`;
+      });
+
+      r.getElementById("opacity")?.addEventListener("change", (e) => {
+        this._fire({ ...this._config, overlay_opacity: parseFloat(e.target.value) });
       });
 
       r.getElementById("show-user")?.addEventListener("change", (e) => {
-        const newConfig = { ...this._config, show_user: e.target.checked };
-        this._config = newConfig; this._fire(newConfig);
+        this._fire({ ...this._config, show_user: e.target.checked });
       });
 
       r.getElementById("grid-rows")?.addEventListener("change", (e) => {
         const val = parseInt(e.target.value);
-        const go  = { ...(this._config.grid_options||{}) };
-        if (!isNaN(val)&&val>0) go.rows=val; else delete go.rows;
-        const newConfig = { ...this._config, grid_options: go };
-        this._config = newConfig; this._fire(newConfig);
+        const go  = { ...(this._config.grid_options || {}) };
+        if (!isNaN(val) && val > 0) go.rows = val; else delete go.rows;
+        this._fire({ ...this._config, grid_options: go });
       });
 
       r.getElementById("grid-cols")?.addEventListener("change", (e) => {
         const val = parseInt(e.target.value);
-        const go  = { ...(this._config.grid_options||{}) };
-        if (!isNaN(val)&&val>0) go.columns=val; else delete go.columns;
-        const newConfig = { ...this._config, grid_options: go };
-        this._config = newConfig; this._fire(newConfig);
+        const go  = { ...(this._config.grid_options || {}) };
+        if (!isNaN(val) && val > 0) go.columns = val; else delete go.columns;
+        this._fire({ ...this._config, grid_options: go });
       });
+    }
+
+    _fire(newConfig) {
+      this._config = newConfig;
+      this.dispatchEvent(new CustomEvent("config-changed", {
+        detail: { config: newConfig }, bubbles: true, composed: true,
+      }));
     }
   }
 
@@ -426,15 +368,19 @@ try {
     static getConfigElement() { return document.createElement("restrictor-card-editor"); }
 
     static getStubConfig() {
-      return { card: null, allowed_users: [], mode: "read_only", overlay_opacity: 0, show_user: false };
+      return {
+        card:            { type: "entities", entities: [] },
+        allowed_users:   [],
+        mode:            "read_only",
+        overlay_opacity: 0,
+        show_user:       false,
+      };
     }
 
     setConfig(config) {
-      if (!config?.card) {
-        this._config = { allowed_users: [], mode: "read_only", overlay_opacity: 0, show_user: false, card: null };
-        return;
-      }
-      let mode = config.mode === "hidden" ? "hidden" : "read_only";
+      if (!config?.card) throw new Error('Restrictor Card: clé "card" manquante.');
+      let mode = "read_only";
+      if (config.mode === "hidden" || config.mode === "read_only") mode = config.mode;
       this._config = {
         allowed_users:   Array.isArray(config.allowed_users) ? config.allowed_users : [],
         mode,
@@ -456,7 +402,7 @@ try {
       const u   = hass?.user;
       const key = u ? `${u.id}|${u.name}` : null;
       if (key !== this._userCacheKey) { this._userCache = null; this._userCacheKey = key; }
-      if (!this._built && this._config?.card) { this._build(); return; }
+      if (!this._built && this._config) { this._build(); return; }
       if (this._innerCard && this._innerCard.hass !== hass) {
         try { this._innerCard.hass = hass; } catch {}
       }
@@ -494,6 +440,7 @@ try {
     }
 
     getCardSize() { return this._innerCard?.getCardSize?.() ?? 3; }
+
     _norm(s) { return String(s ?? "").trim().toLowerCase(); }
 
     async _getCurrentUser() {
@@ -520,7 +467,7 @@ try {
         const now = this._isEditMode();
         if (now !== last) { last = now; this._scheduleReapply(); }
       });
-      this._editObserver.observe(document.body, { attributes:true, subtree:true, attributeFilter:["class"] });
+      this._editObserver.observe(document.body, { attributes: true, subtree: true, attributeFilter: ["class"] });
     }
 
     _attachDomObserver() {
@@ -528,7 +475,7 @@ try {
       if (!sr) return;
       if (this._domObserver) { try { this._domObserver.disconnect(); } catch {} }
       this._domObserver = new MutationObserver(() => this._scheduleReapply());
-      this._domObserver.observe(sr, { childList:true, subtree:true });
+      this._domObserver.observe(sr, { childList: true, subtree: true });
     }
 
     _attachVisibilityHooks() {
@@ -546,6 +493,7 @@ try {
     }
 
     _detachVisibilityHooks() { this._visHandlers.forEach(fn => { try { fn(); } catch {} }); this._visHandlers = []; }
+
     _cancelDebounce() { if (this._debounceTimer) { clearTimeout(this._debounceTimer); this._debounceTimer = null; } }
 
     _scheduleReapply() {
@@ -564,7 +512,7 @@ try {
         if (node.tagName?.toLowerCase() === "ha-card") out.add(node);
         if (node.shadowRoot) {
           node.shadowRoot.querySelectorAll("ha-card").forEach(hc => out.add(hc));
-          node.shadowRoot.querySelectorAll("*").forEach(child => crawl(child, d+1));
+          node.shadowRoot.querySelectorAll("*").forEach(child => crawl(child, d + 1));
         }
       };
       crawl(el, 0);
@@ -583,13 +531,14 @@ try {
       const overlay = document.createElement("div");
       overlay.className = "restrictor-overlay";
       Object.assign(overlay.style, {
-        position:"absolute", inset:"0", zIndex:"10",
-        cursor:        interactive ? "default"  : "not-allowed",
+        position: "absolute", inset: "0", zIndex: "10",
+        cursor:        interactive ? "default"   : "not-allowed",
         background:    `rgba(0,0,0,${opacity||0})`,
-        pointerEvents: interactive ? "none"     : "auto",
+        pointerEvents: interactive ? "none"      : "auto",
       });
       const cs = getComputedStyle(targetHaCard);
       if (!cs.position || cs.position === "static") targetHaCard.style.position = "relative";
+
       if (!interactive) {
         const stop = e => { e.stopPropagation(); e.preventDefault(); };
         ["click","mousedown","mouseup","touchstart","touchend",
@@ -606,6 +555,7 @@ try {
           overlay.appendChild(lock);
         }
       }
+
       if (showBadge) {
         const badge = document.createElement("div");
         badge.textContent = badgeText;
@@ -616,6 +566,7 @@ try {
         });
         overlay.appendChild(badge);
       }
+
       targetHaCard.appendChild(overlay);
       this._evtCleanup.push(() => { try { targetHaCard.removeChild(overlay); } catch {} });
     }
@@ -624,36 +575,45 @@ try {
       if (!this._innerCard) return;
       this._clearOverlays();
       this.style.display = "";
+
       const needUser = this._config.show_user || this._config.allowed_users.length > 0;
       let user = { id: "", name: "" };
       if (needUser) user = await this._getCurrentUser();
+
       let isAllowed = true;
       if (this._config.allowed_users.length > 0) {
         const uname = this._norm(user.name);
         isAllowed = this._config.allowed_users.some(x => this._norm(x) === uname);
       }
+
       if (this._isEditMode()) { this._lastLockState = "edit"; return; }
+
       if (isAllowed) {
         this._lastLockState = "allowed";
         if (this._config.show_user) {
           const first = this._findAllHaCards(this._innerCard)[0];
           if (first) this._addOverlayInside(first, {
-            showBadge:true, badgeText:user.name||"(inconnu)",
-            opacity:0, showLock:false, interactive:true,
+            showBadge: true, badgeText: user.name || "(inconnu)",
+            opacity: 0, showLock: false, interactive: true,
           });
         }
         return;
       }
+
       if (this._config.mode === "hidden") {
-        this._lastLockState = "hidden"; this.style.display = "none"; return;
+        this._lastLockState = "hidden";
+        this.style.display  = "none";
+        return;
       }
+
       this._lastLockState = "locked";
       this._findAllHaCards(this._innerCard).forEach((hc, idx) => {
         this._addOverlayInside(hc, {
           showBadge:   this._config.show_user && idx === 0,
           badgeText:   user.name || "(inconnu)",
           opacity:     this._config.overlay_opacity,
-          showLock:    true, interactive: false,
+          showLock:    true,
+          interactive: false,
         });
       });
     }
