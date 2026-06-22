@@ -1,9 +1,9 @@
-// Restrictor Card — v1.3.0
-// - Éditeur graphique natif HA ultra-intégré (Plus besoin de passer par le YAML pour la sous-carte)
+// Restrictor Card — v1.3.1
+// - Éditeur graphique corrigé via hui-element-editor (Correction de la zone vide)
+// - Gestion du contexte Lovelace pour l'affichage des cartes personnalisées
 // - Users chargés via WebSocket hass.connection
-// - Support du sélecteur visuel d'éléments enfants officiel de Home Assistant
 
-const RESTRICTOR_VERSION = "1.3.0";
+const RESTRICTOR_VERSION = "1.3.1";
 try {
   const KEY  = "restrictor_card_version";
   const prev = localStorage.getItem(KEY);
@@ -71,7 +71,7 @@ try {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // ÉDITEUR GRAPHIQUE AVANCÉ (UI NATIVE)
+  // ÉDITEUR GRAPHIQUE CORRIGÉ (UI NATIVE)
   // ═══════════════════════════════════════════════════════════════════════════
 
   class RestrictorCardEditor extends HTMLElement {
@@ -80,6 +80,7 @@ try {
       this.attachShadow({ mode: "open" });
       this._config = {};
       this._hass   = null;
+      this._lovelace = null;
       this._users  = [];
       this._ready  = false;
       this._subCardEditor = null;
@@ -91,6 +92,14 @@ try {
         this._subCardEditor.hass = hass;
       }
       if (!this._ready) this._init();
+    }
+
+    // Permet à HA d'injecter la configuration Lovelace globale (indispensable pour charger les cartes)
+    set lovelace(lovelace) {
+      this._lovelace = lovelace;
+      if (this._subCardEditor) {
+        this._subCardEditor.lovelace = lovelace;
+      }
     }
 
     setConfig(config) {
@@ -105,7 +114,6 @@ try {
       this._ready = true;
       this._users = await fetchAllUsers(this._hass);
       
-      // Initialisation de la structure globale du DOM de l'éditeur
       const userOptions = this._users.length > 0
         ? this._users.map(u =>
             `<option value="${esc(u.name)}">${esc(u.name)}${u.is_owner ? " 👑" : u.is_admin ? " (admin)" : ""}</option>`
@@ -143,10 +151,10 @@ try {
             border-radius: 8px;
             padding: 12px;
             background: var(--card-background-color, #fafafa);
+            min-height: 60px;
           }
         </style>
 
-        <!-- Contrôle d'accès -->
         <div class="section">
           <div class="section-title">Contrôle d'accès (Restrictor)</div>
           <div class="row">
@@ -177,17 +185,13 @@ try {
 
         <hr>
 
-        <!-- Configuration visuelle de la carte interne -->
         <div class="section">
           <div class="section-title">Design de la carte à protéger</div>
-          <div id="sub-card-editor-root" class="sub-editor-container">
-            <!-- L'éditeur natif de carte Home Assistant sera injecté ici -->
-          </div>
+          <div id="sub-card-editor-root" class="sub-editor-container"></div>
         </div>
 
         <hr>
 
-        <!-- Mise en page -->
         <div class="section">
           <div class="section-title">Mise en page (vue Sections)</div>
           <div class="row">
@@ -209,24 +213,18 @@ try {
     _updateFields() {
       const r = this.shadowRoot;
       if (!r) return;
-
       const cfg = this._config;
 
-      // Update multi-select users
       const allowedUsers = Array.isArray(cfg.allowed_users) ? cfg.allowed_users : [];
       const selectUsers = r.getElementById("allowed-users");
       if (selectUsers) {
-        Array.from(selectUsers.options).forEach(opt => {
-          opt.selected = allowedUsers.includes(opt.value);
-        });
+        Array.from(selectUsers.options).forEach(opt => { opt.selected = allowedUsers.includes(opt.value); });
       }
 
-      // Update mode
       const mode = cfg.mode || "read_only";
       const selectMode = r.getElementById("mode");
       if (selectMode) selectMode.value = mode;
 
-      // Update opacity
       const opacity = typeof cfg.overlay_opacity === "number" ? cfg.overlay_opacity : 0;
       const inputOp = r.getElementById("opacity");
       const valOp = r.getElementById("opacity-val");
@@ -239,11 +237,9 @@ try {
         opRow.style.pointerEvents = mode === "hidden" ? "none" : "";
       }
 
-      // Update show user switch
       const swShowUser = r.getElementById("show-user");
       if (swShowUser) swShowUser.checked = !!cfg.show_user;
 
-      // Update grid
       const gridRows = cfg.grid_options?.rows ?? cfg.grid_rows ?? "";
       const gridCols = cfg.grid_options?.columns ?? cfg.grid_columns ?? "";
       const inputRows = r.getElementById("grid-rows");
@@ -256,28 +252,30 @@ try {
       const root = this.shadowRoot.getElementById("sub-card-editor-root");
       if (!root) return;
 
-      // Si l'éditeur existe déjà, on met juste sa configuration à jour
       if (this._subCardEditor) {
-        this._subCardEditor.config = this._config.card || { type: "entities" };
+        this._subCardEditor.config = this._config.card || { type: "" };
         return;
       }
 
-      // Sinon, on instancie le sélecteur d'éléments de carte officiel de HA
       try {
-        // Force le chargement des composants d'édition de cartes de HA
-        if (!customElements.get("hui-card-element-editor")) {
+        // Garantir le pré-chargement des helpers Lovelace natifs de HA
+        if (!customElements.get("hui-element-editor")) {
           const helpers = window.loadCardHelpers ? await window.loadCardHelpers() : null;
+          if (helpers) {
+             try { helpers.createCardElement({ type: "button" }); } catch {}
+          }
         }
 
-        const editor = document.createElement("hui-card-element-editor");
+        // Création du gestionnaire de sous-carte officiel de HA
+        const editor = document.createElement("hui-element-editor");
         editor.hass = this._hass;
-        editor.config = this._config.card || { type: "entities" };
+        editor.lovelace = this._lovelace;
+        editor.configType = "card"; 
+        editor.config = this._config.card || { type: "" };
 
-        // On écoute les modifications faites graphiquement sur la sous-carte
         editor.addEventListener("config-changed", (ev) => {
           ev.stopPropagation();
-          const newCardConfig = ev.detail.config;
-          const newConfig = { ...this._config, card: newCardConfig };
+          const newConfig = { ...this._config, card: ev.detail.config };
           this._config = newConfig;
           this._fire(newConfig);
         });
