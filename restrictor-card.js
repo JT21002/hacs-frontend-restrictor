@@ -1,9 +1,9 @@
-// Restrictor Card — v1.3.1
-// - Éditeur graphique corrigé via hui-element-editor (Correction de la zone vide)
-// - Gestion du contexte Lovelace pour l'affichage des cartes personnalisées
+// Restrictor Card — v1.3.2
+// - Éditeur graphique basé sur ha-form et ha-yaml-editor pour une compatibilité à 100%
+// - Plus de dépendance aux sous-éditeurs instables qui provoquent des zones vides
 // - Users chargés via WebSocket hass.connection
 
-const RESTRICTOR_VERSION = "1.3.1";
+const RESTRICTOR_VERSION = "1.3.2";
 try {
   const KEY  = "restrictor_card_version";
   const prev = localStorage.getItem(KEY);
@@ -71,7 +71,7 @@ try {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // ÉDITEUR GRAPHIQUE CORRIGÉ (UI NATIVE)
+  // ÉDITEUR GRAPHIQUE COMPATIBLE (HA-FORM + HA-YAML-EDITOR)
   // ═══════════════════════════════════════════════════════════════════════════
 
   class RestrictorCardEditor extends HTMLElement {
@@ -80,33 +80,19 @@ try {
       this.attachShadow({ mode: "open" });
       this._config = {};
       this._hass   = null;
-      this._lovelace = null;
       this._users  = [];
       this._ready  = false;
-      this._subCardEditor = null;
     }
 
     set hass(hass) {
       this._hass = hass;
-      if (this._subCardEditor) {
-        this._subCardEditor.hass = hass;
-      }
       if (!this._ready) this._init();
-    }
-
-    // Permet à HA d'injecter la configuration Lovelace globale (indispensable pour charger les cartes)
-    set lovelace(lovelace) {
-      this._lovelace = lovelace;
-      if (this._subCardEditor) {
-        this._subCardEditor.lovelace = lovelace;
-      }
     }
 
     setConfig(config) {
       this._config = { ...config };
       if (this._ready) {
         this._updateFields();
-        this._renderSubCardEditor();
       }
     }
 
@@ -146,12 +132,11 @@ try {
           .opacity-row label { flex:0 0 160px; font-size:14px; color:var(--primary-text-color); }
           .opacity-val { font-size:13px; color:var(--secondary-text-color); min-width:34px; text-align:right; }
           hr { border:none; border-top:1px solid var(--divider-color,#e0e0e0); margin:16px 0; }
-          .sub-editor-container {
-            border: 1px dashed var(--divider-color, #e0e0e0);
+          .yaml-container {
+            border: 1px solid var(--divider-color, #e0e0e0);
             border-radius: 8px;
-            padding: 12px;
+            padding: 4px;
             background: var(--card-background-color, #fafafa);
-            min-height: 60px;
           }
         </style>
 
@@ -186,8 +171,13 @@ try {
         <hr>
 
         <div class="section">
-          <div class="section-title">Design de la carte à protéger</div>
-          <div id="sub-card-editor-root" class="sub-editor-container"></div>
+          <div class="section-title">Design de la carte à protéger (Code de la carte)</div>
+          <div class="yaml-container">
+            <ha-yaml-editor id="yaml-editor" label="Configuration de la carte"></ha-yaml-editor>
+          </div>
+          <div style="font-size:11px; color:var(--secondary-text-color); margin-top:4px;">
+            Saisissez ici la configuration classique de la carte enfant (ex: type: entities, puis vos entités).
+          </div>
         </div>
 
         <hr>
@@ -207,7 +197,6 @@ try {
 
       this._attachListeners();
       this._updateFields();
-      this._renderSubCardEditor();
     }
 
     _updateFields() {
@@ -246,45 +235,15 @@ try {
       const inputCols = r.getElementById("grid-cols");
       if (inputRows) inputRows.value = gridRows;
       if (inputCols) inputCols.value = gridCols;
-    }
 
-    async _renderSubCardEditor() {
-      const root = this.shadowRoot.getElementById("sub-card-editor-root");
-      if (!root) return;
-
-      if (this._subCardEditor) {
-        this._subCardEditor.config = this._config.card || { type: "" };
-        return;
-      }
-
-      try {
-        // Garantir le pré-chargement des helpers Lovelace natifs de HA
-        if (!customElements.get("hui-element-editor")) {
-          const helpers = window.loadCardHelpers ? await window.loadCardHelpers() : null;
-          if (helpers) {
-             try { helpers.createCardElement({ type: "button" }); } catch {}
-          }
+      // Injection sécurisée dans l'éditeur YAML
+      const yamlEditor = r.getElementById("yaml-editor");
+      if (yamlEditor) {
+        yamlEditor.hass = this._hass;
+        const currentCardConfig = cfg.card || { type: "entities", entities: [] };
+        if (JSON.stringify(yamlEditor.value) !== JSON.stringify(currentCardConfig)) {
+          yamlEditor.value = currentCardConfig;
         }
-
-        // Création du gestionnaire de sous-carte officiel de HA
-        const editor = document.createElement("hui-element-editor");
-        editor.hass = this._hass;
-        editor.lovelace = this._lovelace;
-        editor.configType = "card"; 
-        editor.config = this._config.card || { type: "" };
-
-        editor.addEventListener("config-changed", (ev) => {
-          ev.stopPropagation();
-          const newConfig = { ...this._config, card: ev.detail.config };
-          this._config = newConfig;
-          this._fire(newConfig);
-        });
-
-        root.innerHTML = "";
-        root.appendChild(editor);
-        this._subCardEditor = editor;
-      } catch (err) {
-        root.innerHTML = `<div style="color:red">Erreur d'initialisation de l'UI HA : ${err.message}</div>`;
       }
     }
 
@@ -312,6 +271,14 @@ try {
 
       r.getElementById("show-user")?.addEventListener("change", (e) => {
         this._fire({ ...this._config, show_user: e.target.checked });
+      });
+
+      r.getElementById("yaml-editor")?.addEventListener("value-changed", (e) => {
+        e.stopPropagation();
+        const newCardConfig = e.detail.value;
+        if (newCardConfig) {
+          this._fire({ ...this._config, card: newCardConfig });
+        }
       });
 
       r.getElementById("grid-rows")?.addEventListener("change", (e) => {
